@@ -1,0 +1,10 @@
+# Serves plain HTTP on port 80 — works immediately with a bare VPS IP.
+#
+# For automatic HTTPS (Let's Encrypt), replace ":80" with your domain and
+# point a DNS A record at this server first:
+#
+#   api.example.com
+#   reverse_proxy api:8000
+
+:80
+reverse_proxy api:8000

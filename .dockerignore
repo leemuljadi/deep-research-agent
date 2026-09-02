@@ -1,0 +1,19 @@
+# Never bake secrets or local state into the image.
+.env
+.git
+.venv
+venv
+__pycache__/
+**/__pycache__/
+*.pyc
+
+# Server-side artifacts, not needed in the image.
+docker-compose.yml
+Caddyfile
+Dockerfile
+.dockerignore
+# Keep data/sample/*.md — that's the demo corpus the ingest step indexes.
+/README.md
+.env.example
+evals/reports/
+.DS_Store

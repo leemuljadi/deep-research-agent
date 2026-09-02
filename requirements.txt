@@ -1,0 +1,27 @@
+# Core
+pydantic>=2.7
+python-dotenv>=1.0
+
+# LLM routing (chat + embeddings, multi-provider)
+litellm>=1.40
+
+# HTTP API (VPS deployment: uvicorn server:app)
+fastapi>=0.115
+uvicorn>=0.30
+
+# Agent orchestration (stateful workflows)
+langgraph>=0.2
+langchain-core>=0.2
+
+# Vector DB / SQL
+psycopg[binary]>=3.1
+pgvector>=0.2
+
+opentelemetry-instrumentation-requests>=0.47b0
+opentelemetry-exporter-otlp-proto-http>=1.24
+numpy>=1.26
+
+# Observability (optional)
+opentelemetry-api>=1.24
+opentelemetry-sdk>=1.24
+opentelemetry-instrumentation-requests>=0.47b0

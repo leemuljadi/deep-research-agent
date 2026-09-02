@@ -1,0 +1,25 @@
+# Ignore env + secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Eval reports (regenerate)
+evals/reports/*.json
+
+# Data (you supply your own corpus)
+data/corpus/*
+!data/sample/
+
+# OS
+.DS_Store
+
+# BMAD workflow artifacts
+_bmad/
+_bmad-output/
+
+# Agent workspace
+.agents/
