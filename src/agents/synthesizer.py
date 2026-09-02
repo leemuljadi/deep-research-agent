@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 
 from ..llm import Usage, chat_with_usage
-from ..schemas import ResearchPlan, ResearchReport, Source
+from ..schemas import ResearchPlan, ResearchReport, Source, SubQuestionResult
 
 _SYNTH_SYSTEM = (
     "You are a senior analyst. Given a research objective and the findings from "
@@ -19,11 +19,14 @@ _SYNTH_SYSTEM = (
 
 def synthesize(
     plan: ResearchPlan,
-    sub_results: list[tuple[str, list[str], list[Source]]],
+    sub_results: list[SubQuestionResult],
 ) -> tuple[ResearchReport, Usage]:
     blocks = []
-    for sub_q, findings, _srcs in sub_results:
-        blocks.append(f"## {sub_q}\n" + "\n".join(f"- {f}" for f in findings))
+    for result in sub_results:
+        blocks.append(
+            f"## {result.sub_question}\n"
+            + "\n".join(f"- {finding}" for finding in result.findings)
+        )
     joined = "\n\n".join(blocks)
 
     raw, usage = chat_with_usage(

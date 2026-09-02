@@ -34,7 +34,7 @@ def _build_router() -> Router:
     models: list[dict[str, Any]] = [
         {
             "model_name": "chat",
-            "litellm_params": {"model": settings.chat_model},
+            "litellm_params": {"model": settings.chat_model, "order": 1},
         },
         {
             "model_name": "embed",
@@ -46,7 +46,10 @@ def _build_router() -> Router:
         models.append(
             {
                 "model_name": "chat",
-                "litellm_params": {"model": settings.chat_model_fallback},
+                "litellm_params": {
+                    "model": settings.chat_model_fallback,
+                    "order": 2,
+                },
             }
         )
     return Router(model_list=models)

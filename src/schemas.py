@@ -24,6 +24,14 @@ class Source(BaseModel):
     score: float | None = None
 
 
+class SubQuestionResult(BaseModel):
+    """Validated findings and sources for one researched sub-question."""
+
+    sub_question: str
+    findings: list[str]
+    sources: list[Source]
+
+
 class ResearchReport(BaseModel):
     """The final grounded, structured report."""
 

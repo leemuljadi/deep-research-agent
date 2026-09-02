@@ -48,9 +48,10 @@ def ingest_file(path: Path, title: str | None = None) -> int:
 
     chunks = chunk_text(text)
     embeddings = embed_texts(chunks)
+    chunk_rows = list(zip(range(len(chunks)), chunks, embeddings, strict=True))
 
     upsert_document(doc_id=doc_id, title=title, content=text, url=str(path))
-    insert_chunks(doc_id, list(enumerate(zip(chunks, embeddings))))
+    insert_chunks(doc_id, chunk_rows)
     return len(chunks)
 
 
@@ -62,6 +63,14 @@ def ingest_directory(dir_path: Path) -> int:
         if path.is_file() and path.suffix.lower() in {".txt", ".md", ".py"}:
             try:
                 total += ingest_file(path)
-            except Exception as exc:  # noqa: BLE001 - keep indexing the rest
+            except (OSError, UnicodeError) as exc:
                 print(f"  [skip] {path.name}: {exc}")
+            except AssertionError as exc:
+                raise AssertionError(f"{path}: {exc}") from exc
+            except TypeError as exc:
+                raise TypeError(f"{path}: {exc}") from exc
+            except ValueError as exc:
+                raise ValueError(f"{path}: {exc}") from exc
+            except Exception as exc:
+                raise RuntimeError(f"Failed to ingest {path}: {exc}") from exc
     return total

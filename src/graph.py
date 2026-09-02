@@ -20,7 +20,7 @@ from .agents.planner import plan
 from .agents.researcher import research_sub_question
 from .agents.synthesizer import synthesize
 from .llm import Usage
-from .schemas import ResearchPlan, ResearchReport
+from .schemas import ResearchPlan, ResearchReport, SubQuestionResult
 from .tracing import current_context, record_cost, trace
 
 
@@ -28,8 +28,8 @@ class ResearchState(TypedDict):
     question: str
     plan: ResearchPlan
     # Parallel researchers each return partial lists; `operator.add` merges them.
-    sub_results: Annotated[list, operator.add]  # list of (sub_question, findings, sources)
-    usage_log: Annotated[list, operator.add]  # list[Usage] from every LLM call
+    sub_results: Annotated[list[SubQuestionResult], operator.add]
+    usage_log: Annotated[list[Usage], operator.add]
     report: ResearchReport
     otel_ctx: object  # OTel context so researcher spans parent to the run span
 
@@ -57,7 +57,13 @@ def _researcher(payload: dict) -> dict:
         findings, sources, usage = research_sub_question(payload["sub_question"])
         record_cost(span, tokens=usage.total_tokens, cost_usd=usage.cost_usd)
     return {
-        "sub_results": [(payload["sub_question"], findings, sources)],
+        "sub_results": [
+            SubQuestionResult(
+                sub_question=payload["sub_question"],
+                findings=findings,
+                sources=sources,
+            )
+        ],
         "usage_log": [usage],
     }
 
