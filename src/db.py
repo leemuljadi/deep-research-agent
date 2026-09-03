@@ -206,7 +206,7 @@ def get_job(job_id: str) -> dict[str, Any] | None:
     """Read one job row by id (None when absent or not a valid UUID)."""
     try:
         uuid.UUID(job_id)
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError, TypeError):
         return None
     with connect() as conn:
         with conn.cursor() as cur:

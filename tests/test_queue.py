@@ -7,6 +7,7 @@ from unittest.mock import patch
 from src import db
 from src.schemas import RunStatus, RunStatusResponse
 from unittest.mock import MagicMock, patch
+from fastapi.testclient import TestClient
 
 
 class FakeCursor:
@@ -235,6 +236,122 @@ class SchemaTests(unittest.TestCase):
             error=None,
         )
         self.assertEqual(response.report.summary, "s")
+
+
+class RunStatusEndpointTests(unittest.TestCase):
+    """GET /runs/{run_id}: row → RunStatusResponse mapping and 404s (CAP-1, story 3)."""
+
+    def _row(
+        self, *, status: str, result=None, error=None
+    ) -> dict:
+        return {
+            "id": "d0a1b2c3-d4e5-4678-9abc-def012345678",
+            "question": "What is RAG?",
+            "status": status,
+            "result": result,
+            "error": error,
+            "created_at": datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc),
+            "updated_at": datetime(2026, 9, 3, 12, 5, tzinfo=timezone.utc),
+        }
+
+    def _get(self, row) -> object:
+        import server
+
+        # No context manager: the app lifespan runs init_db() → real DB;
+        # these tests need only the routing layer.
+        with patch.object(server, "get_job", return_value=row):
+            return TestClient(server.app).get(
+                "/runs/d0a1b2c3-d4e5-4678-9abc-def012345678"
+            )
+
+    def test_queued_row_maps_without_report_or_error(self) -> None:
+        response = self._get(self._row(status="queued"))
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["run_id"], "d0a1b2c3-d4e5-4678-9abc-def012345678")
+        self.assertEqual(body["question"], "What is RAG?")
+        self.assertEqual(body["status"], "queued")
+        self.assertIsNone(body["report"])
+        self.assertIsNone(body["error"])
+        # Row timestamps are datetime → serialized to ISO strings in the mapping.
+        self.assertEqual(body["created_at"], "2026-09-03T12:00:00+00:00")
+        self.assertEqual(body["updated_at"], "2026-09-03T12:05:00+00:00")
+
+    def test_completed_row_maps_report_through_model_validation(self) -> None:
+        report = {
+            "summary": "s",
+            "findings": ["f1"],
+            "sources": [{"title": "t", "url": "https://x", "snippet": "snip"}],
+            "confidence": 0.9,
+            "cost_usd": 0.01,
+            "latency_seconds": 2.5,
+            "total_tokens": 100,
+        }
+        response = self._get(self._row(status="completed", result=report))
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], "completed")
+        self.assertIsNone(body["error"])
+        # model_validate normalizes the row JSON (adds Source.score=None).
+        self.assertEqual(body["report"]["summary"], "s")
+        self.assertEqual(body["report"]["findings"], ["f1"])
+        self.assertEqual(
+            body["report"]["sources"],
+            [{"title": "t", "url": "https://x", "snippet": "snip", "score": None}],
+        )
+        self.assertEqual(body["report"]["confidence"], 0.9)
+        self.assertEqual(body["report"]["total_tokens"], 100)
+
+    def test_failed_row_maps_error_without_report(self) -> None:
+        response = self._get(self._row(status="failed", error="ValidationError: bad plan"))
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], "failed")
+        self.assertEqual(body["error"], "ValidationError: bad plan")
+        self.assertIsNone(body["report"])
+
+    def test_corrupt_result_json_is_500_not_client_error(self) -> None:
+        response = self._get(self._row(status="completed", result={"summary": 123}))
+        self.assertEqual(response.status_code, 500)
+        self.assertIn("failed validation", response.json()["detail"])
+
+    def test_unknown_id_is_404(self) -> None:
+        response = self._get(None)
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json(), {"detail": "run not found"})
+
+    def test_malformed_id_is_404_never_500(self) -> None:
+        """get_job rejects non-UUID ids before any DB access — no 500, no connection."""
+        import server
+
+        for bad in ("../../etc/passwd", "not-a-uuid", "%2e%2e"):
+            with self.subTest(bad=bad):
+                with patch.object(db, "connect") as never:
+                    response = TestClient(server.app).get("/runs/" + bad)
+                    never.assert_not_called()
+                    self.assertEqual(response.status_code, 404)
+
+    def test_get_job_sql_shape(self) -> None:
+        """get_job's SELECT is pinned by shape (house idiom) — schema drift fails here."""
+        cursor = FakeCursor(rows=[{"id": "abc", "question": "q"}])
+        with _patched(cursor):
+            row = db.get_job("d0a1b2c3-d4e5-4678-9abc-def012345678")
+        self.assertIsNotNone(row)
+        self.assertEqual(
+            cursor.calls[0][0], "SELECT * FROM research_jobs WHERE id = %s"
+        )
+        self.assertEqual(
+            cursor.calls[0][1], ("d0a1b2c3-d4e5-4678-9abc-def012345678",)
+        )
+
+    def test_get_job_rejects_malformed_id_without_db(self) -> None:
+        """Direct unit-level check of the UUID guard (route-level test can be
+        satisfied before reaching get_job — this pins the function itself)."""
+        with patch.object(db, "connect") as never:
+            self.assertIsNone(db.get_job("not-a-uuid"))
+            self.assertIsNone(db.get_job("../../etc/passwd"))
+            self.assertIsNone(db.get_job(None))
+            never.assert_not_called()
 
 
 if __name__ == "__main__":

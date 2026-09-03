@@ -46,6 +46,7 @@
   .src .t { font-weight: 600; }
   .src .u { color: #2563eb; word-break: break-all; }
   .err { color: #b91c1c; }
+  .muted { color: #6b7280; font-size: .85rem; }
   ol.findings, ul.sources { padding-left: 1.2rem; margin: .5rem 0; }
   ul.sources { list-style: none; padding-left: 0; }
   h2 { font-size: 1rem; margin: 1.25rem 0 .25rem; color: #374151; }
@@ -84,11 +85,151 @@
     <div class="meta" id="meta"></div>
   </div>
 
+  <div id="poll" class="card hidden" aria-live="polite"><span class="spinner"></span><span id="pollmsg">Queued&hellip;</span>
+    <span id="pollrun" class="muted"></span>
+    <span id="pollerr" class="err"></span></div>
   <div id="err" class="card err hidden"></div>
 </div>
 
 <script>
 const $ = id => document.getElementById(id);
+
+// Terminal statuses (AD-14): polling stops on any of these.
+const TERMINAL = new Set(["completed", "failed", "cancelled", "cost_cap_exceeded"]);
+let pollTimer = null;
+let pollGeneration = 0; // bumped by stopPoll; stale ticks from old runs no-op
+
+function renderReport(report) {
+  $("summary").textContent = report.summary;
+  $("findings").replaceChildren(
+    ...report.findings.map(f => {
+      const li = document.createElement("li");
+      li.className = "finding";
+      li.textContent = f;
+      return li;
+    })
+  );
+  $("sources").replaceChildren(
+    ...report.sources.map(s => {
+      const li = document.createElement("li");
+      li.className = "src";
+      const t = document.createElement("div");
+      t.className = "t";
+      t.textContent = s.title;
+      li.append(t);
+      if (s.url) {
+        const a = document.createElement("a");
+        a.className = "u";
+        a.href = s.url;
+        a.textContent = s.url;
+        a.target = "_blank";
+        a.rel = "noopener";
+        li.append(a);
+      }
+      const p = document.createElement("div");
+      p.textContent = s.snippet;
+      li.append(p);
+      return li;
+    })
+  );
+  $("meta").replaceChildren(
+    ...[["confidence", report.confidence != null ? (100 * report.confidence).toFixed(0) + "%" : null],
+        ["cost", report.cost_usd != null ? "$" + report.cost_usd.toFixed(4) : null],
+        ["tokens", report.total_tokens],
+        ["latency", report.latency_seconds != null ? report.latency_seconds.toFixed(1) + "s" : null]]
+      .filter(([, v]) => v != null)
+      .map(([k, v]) => {
+        const span = document.createElement("span");
+        const b = document.createElement("b");
+        b.textContent = k + ": ";
+        span.append(b, String(v));
+        return span;
+      })
+  );
+  $("out").classList.remove("hidden");
+}
+
+function stopPoll() {
+  if (pollTimer !== null) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+  pollGeneration += 1; // invalidate any in-flight tick from the old run
+}
+
+function resetPollUi() {
+  $("busy").classList.add("hidden");
+  $("poll").classList.add("hidden");
+  $("pollerr").textContent = "";
+  $("go").disabled = false;
+}
+
+// Fixed-interval poll (2s); stops on any terminal status (CAP-1).
+function startPoll(runId) {
+  stopPoll();
+  const generation = pollGeneration; // this run's token
+  $("poll").classList.remove("hidden");
+  $("pollrun").textContent = "run " + runId;
+  const tick = async () => {
+    if (generation !== pollGeneration) return; // stale tick: a newer run owns the UI
+    try {
+      const res = await fetch("/runs/" + encodeURIComponent(runId));
+      $("pollerr").textContent = "";
+      if (res.status === 404) {
+        stopPoll();
+        resetPollUi();
+        $("err").textContent = "Run " + runId + " not found.";
+        $("err").classList.remove("hidden");
+        return;
+      }
+      if (res.status >= 500) {
+        // Permanent server-side data problem (e.g. corrupt stored report):
+        // retrying cannot fix it — stop with a diagnostic instead of looping.
+        stopPoll();
+        resetPollUi();
+        $("err").textContent = "Status check failed permanently (HTTP " + res.status + ") for run " + runId + ".";
+        $("err").classList.remove("hidden");
+        return;
+      }
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const r = await res.json();
+      if (generation !== pollGeneration) return; // superseded while awaiting
+      if (r.status === "completed") {
+        stopPoll();
+        resetPollUi();
+        if (r.report) {
+          renderReport(r.report);
+        } else {
+          $("err").textContent = "Run " + runId + " completed without a stored report.";
+          $("err").classList.remove("hidden");
+        }
+      } else if (r.status === "failed") {
+        stopPoll();
+        resetPollUi();
+        $("err").textContent = "Run failed" + (r.error ? " — " + r.error : ".");
+        $("err").classList.remove("hidden");
+      } else if (TERMINAL.has(r.status)) {
+        stopPoll();
+        resetPollUi();
+        $("err").textContent = "Run " + runId + " ended with status: " + r.status + (r.error ? " — " + r.error : "") + ".";
+        $("err").classList.remove("hidden");
+      } else if (r.status === "waiting_for_input") {
+        $("pollmsg").textContent = "Waiting for your approval at a gate…";
+      } else {
+        $("pollmsg").textContent =
+          r.status === "queued" ? "Queued — waiting for a worker\u2026" : "Running\u2026";
+      }
+    } catch (ex) {
+      if (generation !== pollGeneration) return;
+      // Transient fetch failure: keep polling, surface a notice.
+      $("pollerr").textContent = " (status check failed, retrying — " + ex.message + ")";
+    }
+  };
+  pollTimer = setInterval(tick, 2000);
+  tick();
+}
+
+
 $("f").addEventListener("submit", async e => {
   e.preventDefault();
   const question = $("q").value.trim();
@@ -96,7 +237,11 @@ $("f").addEventListener("submit", async e => {
   $("go").disabled = true;
   $("err").classList.add("hidden");
   $("out").classList.add("hidden");
-  $("busy").classList.remove("hidden");
+  $("busy").classList.add("hidden");
+  stopPoll(); // cancel any previous run's polling BEFORE showing this run's card
+  $("poll").classList.remove("hidden");
+  $("pollmsg").textContent = "Submitting\u2026";
+  $("pollerr").textContent = "";
   try {
     const res = await fetch("/research", {
       method: "POST",
@@ -105,21 +250,15 @@ $("f").addEventListener("submit", async e => {
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
     const r = await res.json();
+    if (!r.run_id) throw new Error("(unexpected response)");
     // Async contract (CAP-1): the response is {run_id}; the worker executes
-    // the graph. Poll GET /runs/{id} (story 3) — until then, surface the id.
-    $("summary").textContent = r.run_id
-      ? "Submitted — run " + r.run_id + " is queued. Status endpoint lands in the next release."
-      : "(unexpected response)";
-    $("findings").replaceChildren();
-    $("sources").replaceChildren();
-    $("meta").replaceChildren();
-    $("out").classList.remove("hidden");
+    // the graph. Poll GET /runs/{id} every 2s until a terminal status.
+    $("pollmsg").textContent = "Queued\u2026";
+    startPoll(r.run_id);
   } catch (ex) {
+    stopPoll();
     $("err").textContent = "Research failed — is the database up and a model configured? (" + ex.message + ")";
     $("err").classList.remove("hidden");
-  } finally {
-    $("busy").classList.add("hidden");
-    $("go").disabled = false;
   }
 });
 </script>
