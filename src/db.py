@@ -38,6 +38,10 @@ def init_db() -> None:
                                     'cost_cap_exceeded'
                                 )),
                     worker_id   TEXT,
+                    gate_policy JSONB NOT NULL DEFAULT '["plan","synthesis"]',
+                    state_snapshot JSONB,
+                    resume_question TEXT,
+                    decisions   JSONB NOT NULL DEFAULT '[]',
                     result      JSONB,
                     error       TEXT,
                     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -51,6 +55,20 @@ def init_db() -> None:
                 ON research_jobs (status, created_at)
                 """
             )
+            # Additive migration (story 4): research_jobs tables created before
+            # the gate columns existed (persistent compose volume) must gain
+            # them — CREATE TABLE IF NOT EXISTS no-ops on existing tables.
+            for column, ddl in (
+                ("gate_policy", "JSONB NOT NULL DEFAULT '[\"plan\",\"synthesis\"]'"),
+                ("state_snapshot", "JSONB"),
+                ("resume_question", "TEXT"),
+                ("decisions", "JSONB NOT NULL DEFAULT '[]'"),
+            ):
+                cur.execute(
+                    f"""
+                    ALTER TABLE research_jobs ADD COLUMN IF NOT EXISTS {column} {ddl}
+                    """
+                )
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS documents (
@@ -200,6 +218,111 @@ def fail_job(job_id: str, error: str) -> None:
                 (error, job_id),
             )
         conn.commit()
+
+
+def snapshot_state(job_id: str, state: dict[str, Any]) -> None:
+    """Worker-side write (AD-14 phase-split): pause a claimed run at a gate.
+
+    Stores the full graph-state snapshot, flips the row to `waiting_for_input`
+    and clears the worker claim in one statement. The worker owns all writes
+    to a claimed row, so this update is unconditional.
+    """
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE research_jobs
+                SET status = 'waiting_for_input', state_snapshot = %s,
+                    worker_id = NULL, updated_at = now()
+                WHERE id = %s
+                """,
+                (Json(state), job_id),
+            )
+        conn.commit()
+
+
+def record_decision(job_id: str, decision: str, payload: dict[str, Any]) -> bool:
+    """Api-owned audit write: append a gate decision to the row's decision list.
+
+    Returns False (no rows touched) when the row is no longer `waiting_for_input`
+    — the api must not write to a claimed/running run (phase-split, AD-14).
+    """
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE research_jobs
+                SET decisions = decisions || %s, updated_at = now()
+                WHERE id = %s AND status = 'waiting_for_input'
+                RETURNING id
+                """,
+                (
+                    Json(
+                        {
+                            "decision": decision,
+                            "payload": payload,
+                            "decided_at": _now_iso(),
+                        }
+                    ),
+                    job_id,
+                ),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    return row is not None
+
+
+def resume_run(job_id: str, resume_question: str | None = None) -> bool:
+    """Api-owned resume write (AD-14): `waiting_for_input` → `queued`.
+
+    Conditional single-statement UPDATE: re-enqueues the run for the worker's
+    normal claim path with `resume_question` set for redirect decisions.
+    Returns False when the conditional UPDATE matched 0 rows (race → 409).
+    """
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE research_jobs
+                SET status = 'queued', worker_id = NULL, resume_question = %s,
+                    updated_at = now()
+                WHERE id = %s AND status = 'waiting_for_input'
+                RETURNING id
+                """,
+                (resume_question, job_id),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    return row is not None
+
+
+def cancel_run(job_id: str) -> bool:
+    """Api-owned cancel (AD-14): `waiting_for_input → cancelled` OR
+    `queued → cancelled`, one conditional statement.
+
+    A `running` row is worker-owned; the conditional UPDATE touches 0 rows
+    and False is returned (the api maps that to 409).
+    """
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE research_jobs
+                SET status = 'cancelled', worker_id = NULL, updated_at = now()
+                WHERE id = %s AND status IN ('waiting_for_input', 'queued')
+                RETURNING id
+                """,
+                (job_id,),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    return row is not None
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
 
 
 def get_job(job_id: str) -> dict[str, Any] | None:

@@ -14,8 +14,20 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, StringConstraints, ValidationError
 
-from src.db import enqueue_job, get_job, init_db
-from src.schemas import ResearchReport, RunStatus, RunStatusResponse
+from src.db import (
+    cancel_run,
+    enqueue_job,
+    get_job,
+    init_db,
+    record_decision,
+    resume_run,
+)
+from src.schemas import (
+    GateDecision,
+    ResearchReport,
+    RunStatus,
+    RunStatusResponse,
+)
 
 
 @asynccontextmanager
@@ -79,3 +91,48 @@ _STATIC = Path(__file__).resolve().parent / "static"
 def index() -> FileResponse:
     """Serve the minimal research UI."""
     return FileResponse(_STATIC / "index.html")
+
+
+@app.post("/runs/{run_id}/approve")
+def approve(run_id: str, decision: GateDecision | None = None) -> dict:
+    """Approve the run waiting at a gate: re-enqueue from its snapshot (AD-14)."""
+    if get_job(run_id) is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    if not record_decision(run_id, "approve", (decision.payload if decision else {}) or {}):
+        raise HTTPException(status_code=409, detail="run is not waiting_for_input")
+    if not resume_run(run_id):
+        # Lost the race between the decision record and the resume write.
+        raise HTTPException(status_code=409, detail="run is not waiting_for_input")
+    return {"run_id": run_id, "status": "queued"}
+
+
+@app.post("/runs/{run_id}/redirect")
+def redirect(run_id: str, decision: GateDecision) -> dict:
+    """Redirect the run at a gate: swap the question, then re-enqueue (AD-14).
+
+    The api mutates the snapshot's question before re-enqueueing so the resumed
+    run plans against the redirected question.
+    """
+    row = get_job(run_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    new_question = (decision.payload or {}).get("question")
+    if not isinstance(new_question, str) or not new_question.strip():
+        raise HTTPException(
+            status_code=422, detail="redirect requires a non-empty 'question' payload"
+        )
+    if not record_decision(run_id, "redirect", dict(decision.payload)):
+        raise HTTPException(status_code=409, detail="run is not waiting_for_input")
+    if not resume_run(run_id, resume_question=new_question.strip()):
+        raise HTTPException(status_code=409, detail="run is not waiting_for_input")
+    return {"run_id": run_id, "status": "queued", "question": new_question.strip()}
+
+
+@app.post("/runs/{run_id}/cancel")
+def cancel(run_id: str) -> dict:
+    """Cancel a queued or waiting run; 409 when running (worker owns a claim)."""
+    if get_job(run_id) is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    if not cancel_run(run_id):
+        raise HTTPException(status_code=409, detail="run is not cancellable")
+    return {"run_id": run_id, "status": "cancelled"}

@@ -1,6 +1,8 @@
 """Pydantic schemas for structured outputs and agent tool arguments."""
 from __future__ import annotations
 
+from typing import Any, Literal
+
 from pydantic import BaseModel, Field
 from enum import StrEnum
 
@@ -15,6 +17,20 @@ class RunStatus(StrEnum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     COST_CAP_EXCEEDED = "cost_cap_exceeded"
+
+
+# --- HITL gate payloads (AD-6, AD-14) -----------------------------------------
+
+class GateDecision(BaseModel):
+    """A human decision taken at a gate: approve, or redirect with a new question."""
+
+    decision: Literal["approve", "redirect"] = Field(
+        description="Decision taken at the gate."
+    )
+    payload: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Decision payload; redirect carries {'question': ...}.",
+    )
 
 
 # --- Structured outputs -------------------------------------------------------
