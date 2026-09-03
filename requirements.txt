@@ -3,14 +3,14 @@ pydantic>=2.7
 python-dotenv>=1.0
 
 # LLM routing (chat + embeddings, multi-provider)
-litellm>=1.82.6
+litellm>=1.82.9  # never 1.82.7/1.82.8 (malicious PyPI uploads, 2026-03) — AD-12
 
 # HTTP API (VPS deployment: uvicorn server:app)
 fastapi>=0.115
 uvicorn>=0.30
 
 # Agent orchestration (stateful workflows)
-langgraph>=0.2
+langgraph>=1.0  # floor must not span the 1.0 breaking change — AD-12
 
 # Vector DB / SQL
 psycopg[binary]>=3.1

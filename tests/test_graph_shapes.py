@@ -135,6 +135,15 @@ class GraphShapeTests(unittest.TestCase):
         self.assertEqual(report.cost_usd, 0.03)
         self.assertEqual(update["usage_log"], [synthesis_usage])
 
+    def test_build_graph_compiles_expected_shape(self) -> None:
+        """LangGraph runtime boundary (AD-12 floor guard): the compiled graph must
+        construct and expose the fixed node set — a 1.x signature change in
+        StateGraph/add_conditional_edges/Send breaks here, not at request time."""
+        compiled = graph.build_graph()
+        self.assertIn("planner", compiled.nodes)
+        self.assertIn("_researcher", compiled.nodes)
+        self.assertIn("synthesizer", compiled.nodes)
+
 
 if __name__ == "__main__":
     unittest.main()
