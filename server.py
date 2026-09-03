@@ -1,20 +1,20 @@
 """HTTP API for the deep-research agent (VPS deployment).
 
 Thin shell around the existing pipeline — no pipeline code is touched:
-`init_db()` runs once at startup (idempotent), POST /research runs the
-LangGraph plan -> research -> synthesise flow and returns the structured report.
+`init_db()` runs once at startup (idempotent), POST /research enqueues a
+job row and returns its run id; the worker service executes the graph.
 """
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from typing import Annotated
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, StringConstraints
 
-from src.db import init_db
-from src.graph import run_research
+from src.db import enqueue_job, init_db
 
 
 @asynccontextmanager
@@ -28,7 +28,7 @@ app = FastAPI(title="Deep-Research Agent", lifespan=lifespan)
 
 
 class ResearchIn(BaseModel):
-    question: str
+    question: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
 @app.get("/ping")
@@ -38,8 +38,8 @@ def ping() -> dict:
 
 @app.post("/research")
 def research(body: ResearchIn) -> dict:
-    report = run_research(body.question)
-    return report.model_dump()
+    job_id = enqueue_job(body.question)
+    return {"run_id": job_id}
 
 
 _STATIC = Path(__file__).resolve().parent / "static"

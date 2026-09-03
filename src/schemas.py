@@ -2,6 +2,19 @@
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
+from enum import StrEnum
+
+
+class RunStatus(StrEnum):
+    """Closed run/job status set (AD-14): terminal = completed/failed/cancelled/cost_cap_exceeded."""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    WAITING_FOR_INPUT = "waiting_for_input"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    COST_CAP_EXCEEDED = "cost_cap_exceeded"
 
 
 # --- Structured outputs -------------------------------------------------------
@@ -30,6 +43,24 @@ class SubQuestionResult(BaseModel):
     sub_question: str
     findings: list[str]
     sources: list[Source]
+
+
+# --- Run / job status shapes --------------------------------------------------
+
+class RunStatusResponse(BaseModel):
+    """Run status shape served by the API and the worker's terminal writes."""
+
+    run_id: str = Field(description="Run/job identifier (UUID).")
+    status: RunStatus = Field(description="Closed run status enum.")
+    question: str = Field(description="The submitted research question.")
+    created_at: str = Field(description="Job creation timestamp (ISO 8601).")
+    updated_at: str = Field(description="Last status transition timestamp (ISO 8601).")
+    report: ResearchReport | None = Field(
+        default=None, description="Validated report when completed, else None."
+    )
+    error: str | None = Field(
+        default=None, description="Error message when failed, else None."
+    )
 
 
 class ResearchReport(BaseModel):

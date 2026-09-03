@@ -50,6 +50,35 @@ services:
     expose:
       - "8000"
 
+  # The async worker: claims jobs from the Postgres queue and executes the
+  # graph. Mirrors the api service (same image/build, separate command) with
+  # no published port.
+  worker:
+    build: .
+    container_name: dra-worker
+    restart: unless-stopped
+    command: python -m scripts.worker
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: dra
+      POSTGRES_PASSWORD: dra
+      POSTGRES_DB: dra
+      WORKER_POLL_SECONDS: ${WORKER_POLL_SECONDS:-2}
+      # LiteLLM model routing — same knobs as the api service.
+      LITELLM_MODEL_CHAT: ${LITELLM_MODEL_CHAT:-ollama/llama3.2}
+      LITELLM_MODEL_CHAT_FALLBACK: ${LITELLM_MODEL_CHAT_FALLBACK:-}
+      LITELLM_MODEL_EMBED: ${LITELLM_MODEL_EMBED:-ollama/nomic-embed-text}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-768}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OLLAMA_API_BASE: ${OLLAMA_API_BASE:-http://host.docker.internal:11434}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
   caddy:
     image: caddy:2
     container_name: dra-caddy

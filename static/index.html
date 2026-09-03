@@ -105,37 +105,14 @@ $("f").addEventListener("submit", async e => {
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
     const r = await res.json();
-    $("summary").textContent = r.summary || "(empty summary)";
-    $("findings").replaceChildren(...(r.findings || []).map(f => {
-      const li = document.createElement("li");
-      li.className = "finding"; li.textContent = f;
-      return li;
-    }));
-    $("sources").replaceChildren(...(r.sources || []).map(s => {
-      const li = document.createElement("li");
-      li.className = "src";
-      const t = document.createElement("div");
-      t.className = "t"; t.textContent = s.title;
-      li.appendChild(t);
-      if (s.snippet) { const sn = document.createElement("div"); sn.textContent = s.snippet; li.appendChild(sn); }
-      if (s.url) { const u = document.createElement("div"); u.className = "u"; u.textContent = s.url; li.appendChild(u); }
-      return li;
-    }));
-    $("meta").replaceChildren(
-      ...[["Confidence", r.confidence != null ? (100 * r.confidence).toFixed(0) + "%" : null],
-          ["Tokens", r.total_tokens],
-          ["Cost", r.cost_usd != null ? "$" + r.cost_usd.toFixed(4) : null],
-          ["Latency", r.latency_seconds != null ? r.latency_seconds.toFixed(1) + "s" : null]]
-        .filter(([, v]) => v != null)
-        .map(([k, v]) => {
-          const s = document.createElement("span");
-          s.innerHTML = "";
-          s.append(k + ": ");
-          const b = document.createElement("b"); b.textContent = v;
-          s.appendChild(b);
-          return s;
-        })
-    );
+    // Async contract (CAP-1): the response is {run_id}; the worker executes
+    // the graph. Poll GET /runs/{id} (story 3) — until then, surface the id.
+    $("summary").textContent = r.run_id
+      ? "Submitted — run " + r.run_id + " is queued. Status endpoint lands in the next release."
+      : "(unexpected response)";
+    $("findings").replaceChildren();
+    $("sources").replaceChildren();
+    $("meta").replaceChildren();
     $("out").classList.remove("hidden");
   } catch (ex) {
     $("err").textContent = "Research failed — is the database up and a model configured? (" + ex.message + ")";
