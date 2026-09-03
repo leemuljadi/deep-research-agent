@@ -12,6 +12,34 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(_PROJECT_ROOT / ".env")
 
 
+
+def _cost_cap_env(raw: str | None) -> float | None:
+    """Parse RUN_COST_CAP_USD; unset/empty/garbage → None (uncapped, AD-15)."""
+    if raw is None or not raw.strip():
+        return None
+    try:
+        cap = float(raw)
+    except ValueError:
+        return None
+    if cap != cap or cap in (float("inf"), float("-inf")):  # NaN / ±Inf
+        return None
+    return cap
+
+
+def _cost_cap_warning(raw: str | None) -> str | None:
+    """Non-fatal warning text when RUN_COST_CAP_USD is set but unparseable —
+    surfaced by the worker/api at startup; the run proceeds uncapped."""
+    if raw is None or not raw.strip():
+        return None
+    try:
+        cap = float(raw)
+    except ValueError:
+        return f"ignoring unparseable RUN_COST_CAP_USD={raw!r}; runs are uncapped"
+    if cap != cap or cap in (float("inf"), float("-inf")):
+        return f"ignoring non-finite RUN_COST_CAP_USD={raw!r}; runs are uncapped"
+    return None
+
+
 @dataclass(frozen=True)
 class Settings:
     # Postgres / pgvector
@@ -46,6 +74,16 @@ class Settings:
     azure_search_endpoint: str | None = field(default_factory=lambda: os.getenv("AZURE_SEARCH_ENDPOINT") or None)
     azure_search_key: str | None = field(default_factory=lambda: os.getenv("AZURE_SEARCH_KEY") or None)
     azure_search_index: str = field(default_factory=lambda: os.getenv("AZURE_SEARCH_INDEX", "deep-research"))
+
+    # Per-run cost cap in USD (AD-15). Unset/garbage = uncapped — the AD-13
+    # zero-key path never trips a cap. Per-run override: job row
+    # `cost_cap_usd` (worker picks row value first).
+    run_cost_cap_usd: float | None = field(
+        default_factory=lambda: _cost_cap_env(os.getenv("RUN_COST_CAP_USD"))
+    )
+    run_cost_cap_warning: str | None = field(
+        default_factory=lambda: _cost_cap_warning(os.getenv("RUN_COST_CAP_USD"))
+    )
 
     @property
     def pg_dsn(self) -> str:

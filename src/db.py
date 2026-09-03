@@ -41,6 +41,7 @@ def init_db() -> None:
                     gate_policy JSONB NOT NULL DEFAULT '["plan","synthesis"]',
                     state_snapshot JSONB,
                     resume_question TEXT,
+                    cost_cap_usd DOUBLE PRECISION NULL,
                     decisions   JSONB NOT NULL DEFAULT '[]',
                     result      JSONB,
                     error       TEXT,
@@ -63,6 +64,7 @@ def init_db() -> None:
                 ("state_snapshot", "JSONB"),
                 ("resume_question", "TEXT"),
                 ("decisions", "JSONB NOT NULL DEFAULT '[]'"),
+                ("cost_cap_usd", "DOUBLE PRECISION"),
             ):
                 cur.execute(
                     f"""
@@ -217,6 +219,25 @@ def fail_job(job_id: str, error: str) -> None:
                 """,
                 (error, job_id),
             )
+
+
+def cost_cap_job(job_id: str, summary: str) -> None:
+    """Mark a job `cost_cap_exceeded` with its cost summary recorded (AD-15).
+
+    Mirrors `fail_job`: worker-owned terminal write, unconditional on the
+    claimed row. The summary (run id, cap, accumulated total, partial-usage
+    note) lands in `error` — the standard failed-style path.
+    """
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE research_jobs
+                SET status = 'cost_cap_exceeded', error = %s, updated_at = now()
+                WHERE id = %s
+                """,
+                (summary, job_id),
+            )
         conn.commit()
 
 
@@ -323,6 +344,8 @@ def _now_iso() -> str:
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc).isoformat()
+
+
 
 
 def get_job(job_id: str) -> dict[str, Any] | None:

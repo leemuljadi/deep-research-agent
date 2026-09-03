@@ -5,13 +5,16 @@ Usage:
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src.config import settings  # noqa: E402
 from src.db import init_db  # noqa: E402
 from src.graph import run_research  # noqa: E402
+from src import llm  # noqa: E402
 
 
 def main() -> None:
@@ -20,7 +23,17 @@ def main() -> None:
         sys.exit(1)
     question = " ".join(sys.argv[1:])
     init_db()
-    report = run_research(question)
+    # Sync path cap protection (AD-15): same run-scoped accumulator the
+    # worker uses, scoped to a synthetic CLI run id; cleared when done.
+    run_id = f"cli-{os.getpid()}"
+    llm.set_run_cap(run_id, settings.run_cost_cap_usd)
+    try:
+        report = run_research(question)
+    except llm.CostCapExceeded as exc:
+        print(f"COST CAP EXCEEDED: {exc}", file=sys.stderr)
+        sys.exit(2)
+    finally:
+        llm.clear_run_cap(run_id)
 
     print("=" * 70)
     print("SUMMARY")

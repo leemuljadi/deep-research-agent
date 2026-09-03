@@ -41,6 +41,10 @@ services:
       EMBEDDING_DIM: ${EMBEDDING_DIM:-768}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Per-run cost cap (AD-15): unset = uncapped; surfaced as a startup
+      # warning when unparseable. The worker enforces; the api passes it
+      # through so the compose knob is one.
+      RUN_COST_CAP_USD: ${RUN_COST_CAP_USD:-}
       # LiteLLM's Ollama provider reads OLLAMA_API_BASE (verified in litellm
       # source); without this it would dial localhost:11434 *inside the
       # container*. host-gateway maps host.docker.internal to the host.
@@ -75,6 +79,8 @@ services:
       EMBEDDING_DIM: ${EMBEDDING_DIM:-768}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Per-run cost cap (AD-15): unset = uncapped; garbage logs a warning.
+      RUN_COST_CAP_USD: ${RUN_COST_CAP_USD:-}
       OLLAMA_API_BASE: ${OLLAMA_API_BASE:-http://host.docker.internal:11434}
     extra_hosts:
       - "host.docker.internal:host-gateway"

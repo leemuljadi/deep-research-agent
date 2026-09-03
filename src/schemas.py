@@ -75,7 +75,8 @@ class RunStatusResponse(BaseModel):
         default=None, description="Validated report when completed, else None."
     )
     error: str | None = Field(
-        default=None, description="Error message when failed, else None."
+        default=None,
+        description="Error/summary message when failed or cost_cap_exceeded, else None.",
     )
 
 

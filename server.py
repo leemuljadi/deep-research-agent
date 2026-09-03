@@ -34,6 +34,10 @@ from src.schemas import (
 async def lifespan(_app: FastAPI):
     # Idempotent: creates the pgvector extension, tables and HNSW/FTS indexes.
     init_db()
+    from src.config import settings
+
+    if settings.run_cost_cap_warning:
+        print(f"[api] WARNING: {settings.run_cost_cap_warning}")
     yield
 
 
@@ -73,7 +77,9 @@ def _row_to_status(row: dict) -> RunStatusResponse:
         created_at=row["created_at"].isoformat(),
         updated_at=row["updated_at"].isoformat(),
         report=report,
-        error=row.get("error") if row["status"] == RunStatus.FAILED else None,
+        error=row.get("error")
+        if row["status"] in (RunStatus.FAILED, RunStatus.COST_CAP_EXCEEDED)
+        else None,
     )
 
 

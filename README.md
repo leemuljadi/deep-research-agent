@@ -208,6 +208,37 @@ certificates automatically.
 
 ---
 
+
+## Per-run cost cap (optional)
+
+Every run can be bounded by a hard spend cap (AD-15). Crossing it terminates
+the run loudly — status `cost_cap_exceeded`, no degraded report, no soft cap:
+
+```bash
+# .env — unset by default (uncapped)
+RUN_COST_CAP_USD=2.00
+```
+
+| Aspect | Behavior |
+|---|---|
+| **Scope** | Per run. Each run accumulates its own total; one run's spend never affects another. |
+| **Default** | `RUN_COST_CAP_USD` unset = **uncapped** — the free Ollama path never trips a cap (its cost stays $0). |
+| **Per-run override** | Set `cost_cap_usd` on a `research_jobs` row (nullable column) — it wins over the env default. |
+| **Enforcement** | One home: the run-scoped accumulator in `src/llm.py`. Every LLM/chat/embedding capture (and, from story 6, every tool cost) folds into the shared run-total and is checked immediately. On the worker's stepwise path, overshoot is bounded by one in-flight cost-bearing call; the CLI's compiled-graph fan-out runs calls concurrently, so its bound is the cost of the calls in flight. |
+| **Exactly reached** | Trips (`>=` semantics) — no free overage. |
+| **Trip behavior** | The run ends with status `cost_cap_exceeded`; the cost summary (cap, accumulated total) is recorded in the run's `error` field. Partial state is not persisted — the trip is terminal. The worker moves on to the next job. |
+| **Bad values** | An unparseable `RUN_COST_CAP_USD` (e.g. `cheap`) logs a startup warning and runs uncapped — it never crashes the worker. |
+
+**Suggested range:** for cloud-model runs on this repo's corpus, start at
+**$0.50–$5.00 per run** — a single web-search-class call can cost ~$0.01–0.10,
+and open_deep_research logged $45.98–$187.09 per 100-task benchmark run
+(langchain-ai/open_deep_research cost logs, 2025-08). Treat the number as a
+circuit breaker, not a budget: set it comfortably above a normal run's measured
+cost so only runaway loops trip it. There is no verified benchmark for this
+corpus yet — instrument real per-run cost (eval harness) before tightening.
+
+---
+
 ## Evaluation harness
 
 `evals/eval_harness.py` runs a labelled **golden set** through the full pipeline and

@@ -16,16 +16,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.db import (  # noqa: E402
     claim_next_job,
     complete_job,
+    cost_cap_job,
     fail_job,
     init_db,
     snapshot_state,
 )
+from src.config import settings  # noqa: E402
 from src.graph import (  # noqa: E402
     deserialize_state,
     initial_state,
     run_research_state,
     serialize_state,
 )
+from src import llm  # noqa: E402
 
 
 def _poll_seconds() -> float:
@@ -51,7 +54,13 @@ def process_one_job(worker_id: str) -> bool:
         return False
     job_id = str(job["id"])
     print(f"[worker {worker_id}] claimed job {job_id}: {job['question']!r}")
+    # Per-run cost cap (AD-15): row override first, then the env default.
+    # Garbage env is already None (uncapped) with a startup warning.
+    cap = job.get("cost_cap_usd")
+    if cap is None:
+        cap = settings.run_cost_cap_usd
     try:
+        llm.set_run_cap(job_id, cap)
         # Resume path (AD-14): when the row carries a state snapshot, rebuild
         # the graph state solely from Postgres — never from worker memory.
         if job.get("state_snapshot"):
@@ -75,6 +84,11 @@ def process_one_job(worker_id: str) -> bool:
             gates = _gate_policy(job)
             state = initial_state(job["question"], gates)
 
+        # A gate-resumed segment re-seeds the accumulator from the snapshot's
+        # usage_log so the cap keeps counting the run's whole spend.
+        llm.seed_run_spend(
+            sum(u.cost_usd for u in (state.get("usage_log") or []))
+        )
         state, gate = run_research_state(state, gates)
         if gate is not None:
             # Gate hit: snapshot the full state to Postgres, flip the row to
@@ -86,6 +100,14 @@ def process_one_job(worker_id: str) -> bool:
         report = state["report"]
         complete_job(job_id, report.model_dump())
         print(f"[worker {worker_id}] job {job_id} completed")
+    except llm.CostCapExceeded as exc:
+        # Cap crossed mid-run (AD-15): run-terminal status; the report is NOT
+        # persisted as completed. The summary lands in `error`.
+        try:
+            cost_cap_job(job_id, str(exc))
+        except Exception as cap_exc:
+            print(f"[worker {worker_id}] job {job_id} cost_cap_exceeded but recording failed too: {cap_exc}")
+        print(f"[worker {worker_id}] job {job_id} cost cap exceeded: {exc}")
     except Exception as exc:
         try:
             fail_job(job_id, f"{type(exc).__name__}: {exc}")
@@ -94,6 +116,9 @@ def process_one_job(worker_id: str) -> bool:
             # per the frozen leave-visible policy. Never crash the loop.
             print(f"[worker {worker_id}] job {job_id} FAILED but recording failed too: {fail_exc}")
         print(f"[worker {worker_id}] job {job_id} failed: {exc}")
+    finally:
+        # One run's scope never leaks into the next claim.
+        llm.clear_run_cap(job_id)
     return True
 
 
@@ -113,8 +138,16 @@ def _gate_policy(job: dict) -> list[str]:
     return filtered
 
 
+def _cap_startup_warning() -> None:
+    """Surface an unparseable RUN_COST_CAP_USD once at startup (AD-15): the
+    run proceeds uncapped rather than crashing."""
+    if settings.run_cost_cap_warning:
+        print(f"[worker] WARNING: {settings.run_cost_cap_warning}")
+
+
 def main() -> None:
     init_db()
+    _cap_startup_warning()
     worker_id = _worker_id()
     poll = _poll_seconds()
     print(f"[worker {worker_id}] polling for jobs every {poll}s")

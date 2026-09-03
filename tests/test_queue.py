@@ -5,10 +5,10 @@ import json
 import unittest
 from contextlib import nullcontext
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
-
 from src import db, graph
 from src.llm import Usage
 from src.schemas import (
@@ -345,6 +345,19 @@ class RunStatusEndpointTests(unittest.TestCase):
         self.assertEqual(body["error"], "ValidationError: bad plan")
         self.assertIsNone(body["report"])
 
+    def test_cost_cap_row_maps_error_with_summary(self) -> None:
+        response = self._get(
+            self._row(
+                status="cost_cap_exceeded",
+                error="cost cap exceeded for run abc: accumulated $1.20 >= cap $1.00",
+            )
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], "cost_cap_exceeded")
+        self.assertIn("cost cap exceeded", body["error"])
+        self.assertIsNone(body["report"])
+
     def test_corrupt_result_json_is_500_not_client_error(self) -> None:
         response = self._get(self._row(status="completed", result={"summary": 123}))
         self.assertEqual(response.status_code, 500)
@@ -387,6 +400,252 @@ class RunStatusEndpointTests(unittest.TestCase):
             self.assertIsNone(db.get_job("../../etc/passwd"))
             self.assertIsNone(db.get_job(None))
             never.assert_not_called()
+
+
+class CostCapTests(unittest.TestCase):
+    """Run-scoped cap accumulator (AD-15): the one enforcement home."""
+
+    def setUp(self) -> None:
+        # Each test starts with no run token; any leaked scope fails loudly.
+        import src.llm as llm
+
+        self.llm = llm
+        if llm.current_run_id() is not None:
+            llm.clear_run_cap(llm.current_run_id())
+
+    def test_accumulator_crosses_at_one_call_overshoot(self) -> None:
+        """Cap 1.0, captures summing past it: the capture that crosses raises
+        with run id + cap + total; earlier captures pass untouched."""
+        self.llm.set_run_cap("run-1", 1.0)
+        self.llm.register_usage("run-1", Usage(cost_usd=0.40))
+        self.llm.register_usage("run-1", Usage(cost_usd=0.42))
+        with self.assertRaises(self.llm.CostCapExceeded) as ctx:
+            self.llm.register_usage("run-1", Usage(cost_usd=0.30))
+        msg = str(ctx.exception)
+        self.assertIn("run-1", msg)
+        self.assertIn("1.0", msg)
+        self.assertIn("1.12", msg)
+        # Overshoot bound: the second call's own cost never landed.
+        with self.assertRaises(self.llm.CostCapExceeded):
+            self.llm.check_cost("run-1", 0.0)
+
+    def test_uncapped_path_never_raises(self) -> None:
+        """No scope → capture is a no-op; behavior identical to story 4."""
+        for _ in range(5):
+            self.llm.register_usage(None, Usage(cost_usd=99.0))
+
+    def test_scope_registered_but_cap_none_never_raises(self) -> None:
+        """set_run_cap(id, None): the run token exists but the cap is None."""
+        self.llm.set_run_cap("run-u", None)
+        self.assertIsNone(self.llm.get_run_cap())
+        self.llm.register_usage("run-u", Usage(cost_usd=42.0))
+
+    def test_cap_exactly_reached_trips_ge_semantics(self) -> None:
+        self.llm.set_run_cap("run-e", 1.0)
+        self.llm.register_usage("run-e", Usage(cost_usd=0.6))
+        with self.assertRaises(self.llm.CostCapExceeded):
+            self.llm.register_usage("run-e", Usage(cost_usd=0.4))
+
+    def test_zero_cost_run_never_trips_any_cap(self) -> None:
+        self.llm.set_run_cap("run-z", 0.01)
+        for _ in range(10):
+            self.llm.register_usage("run-z", Usage(total_tokens=100, cost_usd=0.0))
+
+    def test_zero_cap_trips_on_first_cost_bearing_call(self) -> None:
+        self.llm.set_run_cap("run-0", 0.0)
+        self.llm.register_usage("run-0", Usage(cost_usd=0.0))  # free: no trip
+        with self.assertRaises(self.llm.CostCapExceeded):
+            self.llm.register_usage("run-0", Usage(cost_usd=0.001))
+
+    def test_seed_run_spend_continues_after_gate_resume(self) -> None:
+        """A resumed segment re-seeds from the snapshot's usage_log sum, then
+        the next capture checks against the seeded total."""
+        self.llm.set_run_cap("run-r", 1.0)
+        self.llm.seed_run_spend(0.9)
+        self.llm.register_usage("run-r", Usage(cost_usd=0.05))
+        with self.assertRaises(self.llm.CostCapExceeded):
+            self.llm.register_usage("run-r", Usage(cost_usd=0.10))  # 1.05 >= 1.0
+
+    def test_seed_without_scope_is_noop(self) -> None:
+        """Reseeding with no active scope (worker finally ran, etc.) no-ops."""
+        self.llm.seed_run_spend(99.0)
+
+    def test_clear_run_cap_drops_scope_and_token(self) -> None:
+        self.llm.set_run_cap("run-c", 1.0)
+        self.llm.clear_run_cap("run-c")
+        self.assertIsNone(self.llm.current_run_id())
+        self.assertIsNone(self.llm.get_run_cap())
+        self.llm.register_usage("run-c", Usage(cost_usd=99.0))
+
+    def test_one_call_overshoot_leaves_partial_usage_counted(self) -> None:
+        """The tripping capture's cost IS folded in (total reflects the last
+        in-flight call) — the raise happens after the fold, before return."""
+        self.llm.set_run_cap("run-o", 1.0)
+        self.llm.register_usage("run-o", Usage(cost_usd=0.6))
+        with self.assertRaises(self.llm.CostCapExceeded) as ctx:
+            self.llm.register_usage("run-o", Usage(cost_usd=0.9))
+        # 0.6 + 0.9 = 1.5: the tripping call's cost landed in the total.
+        self.assertIn("1.5", str(ctx.exception))
+
+    def test_chat_with_usage_checks_current_run_cap(self) -> None:
+        """Capture path: chat usage folds into the scoped run and trips there."""
+        resp = SimpleNamespace(
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            _hidden_params={"response_cost": 0.75},
+            choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
+        )
+        self.llm.set_run_cap("run-chat", 1.0)
+        with patch.object(self.llm, "get_router") as router:
+            router.return_value.completion.return_value = resp
+            _, u1 = self.llm.chat_with_usage([{"role": "user", "content": "q"}])
+            self.assertEqual(u1.cost_usd, 0.75)
+            with self.assertRaises(self.llm.CostCapExceeded):
+                self.llm.chat_with_usage([{"role": "user", "content": "q"}])
+
+    def test_embed_texts_checks_current_run_cap(self) -> None:
+        class _EmbResp(dict):  # litellm response: subscript + hidden params
+            _hidden_params = {"response_cost": 0.6}
+
+        self.llm.set_run_cap("run-emb", 0.5)
+        with patch.object(self.llm, "get_router") as router:
+            router.return_value.embedding.return_value = _EmbResp(
+                data=[{"embedding": [0.1]}]
+            )
+            # Cost 0.6 >= cap 0.5: the capture itself trips before returning.
+            with self.assertRaises(self.llm.CostCapExceeded):
+                self.llm.embed_texts(["hello"])
+
+
+class WorkerCapTests(unittest.TestCase):
+    """Worker-side cap wiring (AD-15): set/seed/clear + cost_cap_exceeded row."""
+
+    def _claim_row(self, **overrides) -> dict:
+        row = {
+            "id": "job-1",
+            "question": "q",
+            "gate_policy": [],
+            "state_snapshot": None,
+            "resume_question": None,
+            "cost_cap_usd": None,
+        }
+        row.update(overrides)
+        return row
+
+    def test_worker_maps_cost_cap_exceeded_to_status(self) -> None:
+        from scripts import worker
+        from src.llm import CostCapExceeded
+
+        with (
+            patch.object(worker, "claim_next_job", return_value=self._claim_row()),
+            patch.object(
+                worker, "run_research_state", side_effect=CostCapExceeded(
+                    "cost cap exceeded for run job-1: accumulated $1.0500 >= cap $1.0000"
+                )
+            ),
+            patch.object(worker, "cost_cap_job") as cap_job,
+            patch.object(worker, "fail_job") as fail,
+            patch.object(worker, "complete_job") as complete,
+            patch.object(worker.llm, "set_run_cap") as set_cap,
+            patch.object(worker.llm, "clear_run_cap") as clear_cap,
+        ):
+            # Survives: the worker moves on to subsequent jobs.
+            self.assertTrue(worker.process_one_job("host:1"))
+        cap_job.assert_called_once_with("job-1", "cost cap exceeded for run job-1: accumulated $1.0500 >= cap $1.0000")
+        fail.assert_not_called()
+        complete.assert_not_called()
+        set_cap.assert_called_once_with("job-1", None)  # no cap anywhere: uncapped
+        clear_cap.assert_called_once_with("job-1")
+
+    def test_worker_prefers_row_cap_over_env(self) -> None:
+        from scripts import worker
+
+        with (
+            patch.object(worker, "claim_next_job", return_value=self._claim_row(cost_cap_usd=0.25)),
+            patch.object(worker, "run_research_state", return_value=({"report": None}, "plan")),
+            patch.object(worker, "snapshot_state"),
+            patch.object(worker.llm, "set_run_cap") as set_cap,
+            patch.object(worker.llm, "seed_run_spend") as seed,
+            patch.object(worker.llm, "clear_run_cap"),
+        ):
+            worker.process_one_job("host:1")
+        set_cap.assert_called_once_with("job-1", 0.25)
+        seed.assert_called_once_with(0.0)
+
+    def test_worker_falls_back_to_env_cap(self) -> None:
+        from scripts import worker
+
+        with (
+            patch.object(worker, "claim_next_job", return_value=self._claim_row()),
+            patch.object(worker, "run_research_state", return_value=({"report": None}, "plan")),
+            patch.object(worker, "snapshot_state"),
+            patch.object(worker, "settings") as settings,
+            patch.object(worker.llm, "set_run_cap") as set_cap,
+            patch.object(worker.llm, "clear_run_cap"),
+        ):
+            settings.run_cost_cap_usd = 2.0
+            worker.process_one_job("host:1")
+        set_cap.assert_called_once_with("job-1", 2.0)
+
+    def test_worker_seeds_accumulator_from_snapshot_usage(self) -> None:
+        from scripts import worker
+
+        snapshot_usage = [Usage(cost_usd=0.30), Usage(cost_usd=0.12)]
+        state = {
+            "report": None,
+            "usage_log": snapshot_usage,
+            "gate_policy": [],
+            "passed_gates": [],
+        }
+        with (
+            patch.object(
+                worker,
+                "claim_next_job",
+                return_value=self._claim_row(state_snapshot={"q": 1}),
+            ),
+            patch.object(worker, "deserialize_state", return_value=state),
+            patch.object(worker, "run_research_state", return_value=(state, None)),
+            patch.object(worker.llm, "seed_run_spend") as seed,
+            patch.object(worker.llm, "set_run_cap"),
+            patch.object(worker.llm, "clear_run_cap"),
+        ):
+            worker.process_one_job("host:1")
+        seed.assert_called_once_with(0.42)
+
+    def test_worker_clears_cap_in_finally_on_generic_failure(self) -> None:
+        from scripts import worker
+
+        with (
+            patch.object(worker, "claim_next_job", return_value=self._claim_row()),
+            patch.object(worker, "run_research_state", side_effect=ValueError("boom")),
+            patch.object(worker, "fail_job"),
+            patch.object(worker.llm, "set_run_cap") as set_cap,
+            patch.object(worker.llm, "clear_run_cap") as clear_cap,
+        ):
+            worker.process_one_job("host:1")
+        set_cap.assert_called_once()
+        clear_cap.assert_called_once_with("job-1")
+
+
+class CostCapDdlTests(unittest.TestCase):
+    """cost_cap_usd column: DDL + additive migration (AD-15)."""
+
+    def test_init_db_declares_cost_cap_usd_column(self) -> None:
+        cursor = FakeCursor()
+        with _patched(cursor):
+            db.init_db()
+        sql = _joined_sql(cursor)
+        self.assertIn("cost_cap_usd DOUBLE PRECISION NULL", sql)
+        self.assertIn("cost_cap_usd DOUBLE PRECISION", sql)  # migration ALTER
+        self.assertIn("ADD COLUMN IF NOT EXISTS cost_cap_usd", sql)
+
+    def test_cost_cap_job_mirrors_fail_job(self) -> None:
+        cursor = FakeCursor()
+        with _patched(cursor):
+            db.cost_cap_job("job-1", "cost cap exceeded: $1.05 >= $1.00")
+        self.assertEqual(len(cursor.calls), 1)
+        sql, params = cursor.calls[0]
+        self.assertIn("SET status = 'cost_cap_exceeded', error = %s", sql)
+        self.assertEqual(params, ("cost cap exceeded: $1.05 >= $1.00", "job-1"))
 
 
 class GateDdlTests(unittest.TestCase):
