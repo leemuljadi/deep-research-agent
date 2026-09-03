@@ -1,9 +1,10 @@
 """Researcher sub-agent: retrieves grounding content for one sub-question."""
 from __future__ import annotations
 
+from ..config import settings
 from ..llm import Usage, chat_with_usage
-from ..schemas import Source
-from ..search import hybrid_search
+from ..schemas import RetrieveToolInput, Source
+from ..tools import execute
 
 _SYNTHESIS_SYSTEM = (
     "You are a researcher. Given a sub-question and retrieved source passages, "
@@ -14,10 +15,10 @@ _SYNTHESIS_SYSTEM = (
     '[{"title": str, "url": str|null, "snippet": str, "score": float|null}, ...]}'
 )
 
-
 def research_sub_question(sub_question: str) -> tuple[list[str], list[Source], Usage]:
     """Retrieve grounding chunks and return (findings, sources, usage)."""
-    hits = hybrid_search(sub_question)
+    result = execute(RetrieveToolInput(query=sub_question, top_k=settings.top_k))
+    hits = result.payload if result.state == "ok" else []
     if not hits:
         return [f"No grounding found for: {sub_question}"], [], Usage()
 

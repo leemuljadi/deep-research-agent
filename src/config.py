@@ -39,6 +39,19 @@ def _cost_cap_warning(raw: str | None) -> str | None:
         return f"ignoring non-finite RUN_COST_CAP_USD={raw!r}; runs are uncapped"
     return None
 
+def _tool_timeout_env(raw: str | None) -> float:
+    """Parse TOOL_TIMEOUT_SECONDS; unset/empty/garbage/non-finite/non-positive
+    → 30.0 default (AD-16 per-call tool timeout)."""
+    if raw is None or not raw.strip():
+        return 30.0
+    try:
+        val = float(raw)
+    except ValueError:
+        return 30.0
+    if val != val or val in (float("inf"), float("-inf")) or val <= 0:  # NaN / ±Inf
+        return 30.0
+    return val
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -71,6 +84,7 @@ class Settings:
     azure_search_enabled: bool = field(
         default_factory=lambda: os.getenv("AZURE_SEARCH_ENABLED", "false").lower() == "true"
     )
+
     azure_search_endpoint: str | None = field(default_factory=lambda: os.getenv("AZURE_SEARCH_ENDPOINT") or None)
     azure_search_key: str | None = field(default_factory=lambda: os.getenv("AZURE_SEARCH_KEY") or None)
     azure_search_index: str = field(default_factory=lambda: os.getenv("AZURE_SEARCH_INDEX", "deep-research"))
@@ -83,6 +97,12 @@ class Settings:
     )
     run_cost_cap_warning: str | None = field(
         default_factory=lambda: _cost_cap_warning(os.getenv("RUN_COST_CAP_USD"))
+    )
+
+    # Per-call tool timeout in seconds (AD-16): every tool call terminates
+    # within this window with a terminal ToolResult — never an unbounded wait.
+    tool_timeout_seconds: float = field(
+        default_factory=lambda: _tool_timeout_env(os.getenv("TOOL_TIMEOUT_SECONDS"))
     )
 
     @property

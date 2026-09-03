@@ -112,3 +112,16 @@ class WebSearchToolInput(BaseModel):
 
     query: str = Field(description="Web search query.")
     max_results: int = Field(default=5, ge=1, le=10)
+
+
+class ToolResult(BaseModel):
+    """Terminal result of one tool execution (AD-16).
+
+    Every tool call through the executor ends in exactly one named state:
+    ok, not_found, disabled, error, or timeout — never an open-ended await.
+    """
+
+    tool: str = Field(description="Tool name that produced this result.")
+    state: Literal["ok", "not_found", "disabled", "error", "timeout"]
+    payload: Any = None
+    detail: str | None = None
