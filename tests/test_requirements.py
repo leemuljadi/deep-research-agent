@@ -55,6 +55,10 @@ class RequirementListTests(unittest.TestCase):
         self.assertRequirementFloor(
             requirements, "youtube-transcript-api", (1, 2, 4)
         )
+        # AD-17: server-side MCP must stay on the v2 protocol line and
+        # standalone FastMCP must stay on its v4 application-framework line.
+        self.assertRequirementFloor(requirements, "mcp", (2,))
+        self.assertRequirementFloor(requirements, "fastmcp", (4,))
 
     def assertRequirementFloor(
         self, requirements: dict[str, str], name: str, minimum: tuple[int, ...]

@@ -188,6 +188,14 @@ curl -X POST http://<vps-ip>/research -H 'content-type: application/json' \
   -d '{"question":"Compare carbon accounting obligations across EU, US and Australia"}'
 ```
 
+**MCP** — clients connect to `http://<vps-ip>/mcp` in the same API process and
+can call exactly `submit`, `poll`, `approve`, `redirect`, and `cancel`. These
+verbs only mutate or read the asynchronous job boundary; they never execute the
+graph inline. Before any remote deployment, set a strong (32+ character)
+`MCP_JWT_SECRET` and configure the client to send an HS256 bearer JWT signed
+with that secret. Leaving it unset disables `/mcp` authentication for local
+development and emits a startup warning.
+
 ### HTTPS
 
 Edit `Caddyfile`: replace `:80` with your domain (DNS A record → VPS first) and
@@ -206,6 +214,10 @@ certificates automatically.
   Postgres is exposed on 5432 to the host network for local dev — on the VPS,
   consider removing the `ports:` block from the `db` service (compose services
   talk over the internal network; `expose:` is enough).
+- **MCP proxy hardening**: expose no shell-executing tools; run Uvicorn with
+  `--proxy-headers` when it sits behind the trusted Caddy proxy; disable response
+  buffering for `/mcp`; during protocol migrations, exercise both legacy and
+  2026-07-28 clients.
 
 ---
 

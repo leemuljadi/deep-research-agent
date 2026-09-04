@@ -146,6 +146,12 @@ class Settings:
         )
     )
 
+    # Private-deployment MCP auth (AD-17). Unset deliberately keeps local
+    # development usable; server startup warns that the mount is unprotected.
+    mcp_jwt_secret: str | None = field(
+        default_factory=lambda: os.getenv("MCP_JWT_SECRET") or None
+    )
+
     @property
     def pg_dsn(self) -> str:
         return (

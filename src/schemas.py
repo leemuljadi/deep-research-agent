@@ -1,10 +1,10 @@
 """Pydantic schemas for structured outputs and agent tool arguments."""
 from __future__ import annotations
 
-from typing import Any, Literal
-
-from pydantic import BaseModel, Field
 from enum import StrEnum
+from typing import Annotated, Any, Literal, Mapping
+
+from pydantic import BaseModel, Field, StringConstraints
 
 
 class RunStatus(StrEnum):
@@ -94,6 +94,32 @@ class SubQuestionResult(BaseModel):
     sources: list[Source]
 
 
+NonEmptyText = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1),
+]
+
+
+class ResearchRequest(BaseModel):
+    """A validated research-job submission."""
+
+    question: NonEmptyText
+
+
+class RunAcceptedResponse(BaseModel):
+    """Identifier returned immediately after a job is enqueued."""
+
+    run_id: str
+
+
+class RunTransitionResponse(BaseModel):
+    """Result of an API/MCP mutation at the run boundary."""
+
+    run_id: str
+    status: RunStatus
+    question: str | None = None
+
+
 # --- Run / job status shapes --------------------------------------------------
 
 class RunStatusResponse(BaseModel):
@@ -123,6 +149,25 @@ class ResearchReport(BaseModel):
     cost_usd: float = Field(default=0.0, description="Approx token cost of the run.")
     latency_seconds: float = Field(default=0.0, description="End-to-end run time.")
     total_tokens: int = Field(default=0, description="Total tokens consumed by the run.")
+
+
+def job_row_to_status(row: Mapping[str, Any]) -> RunStatusResponse:
+    """Validate one database job row into the shared status response."""
+    status = RunStatus(row["status"])
+    report = None
+    if status == RunStatus.COMPLETED and row.get("result") is not None:
+        report = ResearchReport.model_validate(row["result"])
+    return RunStatusResponse(
+        run_id=str(row["id"]),
+        status=status,
+        question=row["question"],
+        created_at=row["created_at"].isoformat(),
+        updated_at=row["updated_at"].isoformat(),
+        report=report,
+        error=row.get("error")
+        if status in (RunStatus.FAILED, RunStatus.COST_CAP_EXCEEDED)
+        else None,
+    )
 
 
 # --- Agent tool schemas -------------------------------------------------------

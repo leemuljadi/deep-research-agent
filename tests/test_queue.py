@@ -205,7 +205,7 @@ class WorkerLoopTests(unittest.TestCase):
 
         cursor = FakeCursor(rows=[{"id": "abc-123"}])
         with _patched(cursor), patch.object(db, "enqueue_job", return_value="abc-123"):
-            response = server.research(server.ResearchIn(question="What is RAG?"))
+            response = server.research(server.ResearchRequest(question="What is RAG?"))
         self.assertEqual(response, {"run_id": "abc-123"})
 
     def test_research_endpoint_rejects_blank_question(self) -> None:
@@ -215,7 +215,7 @@ class WorkerLoopTests(unittest.TestCase):
 
         for bad in ("", "   "):
             with self.assertRaises(ValidationError):
-                server.ResearchIn(question=bad)
+                server.ResearchRequest(question=bad)
 
     def test_empty_claim_polls_noop(self) -> None:
         from scripts import worker

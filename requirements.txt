@@ -12,6 +12,10 @@ litellm>=1.82.9  # never 1.82.7/1.82.8 (malicious PyPI uploads, 2026-03) — AD-
 fastapi>=0.115
 uvicorn>=0.30
 
+# MCP serving (FastMCP 4 on the v2 protocol line — AD-12/AD-17)
+fastmcp>=4,<5
+mcp>=2
+
 # Agent orchestration (stateful workflows)
 langgraph>=1.0  # floor must not span the 1.0 breaking change — AD-12
 

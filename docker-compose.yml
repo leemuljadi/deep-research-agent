@@ -45,6 +45,9 @@ services:
       # warning when unparseable. The worker enforces; the api passes it
       # through so the compose knob is one.
       RUN_COST_CAP_USD: ${RUN_COST_CAP_USD:-}
+      # Private MCP bearer auth (AD-17). Unset is development-only and makes
+      # /mcp unauthenticated; server startup emits an explicit warning.
+      MCP_JWT_SECRET: ${MCP_JWT_SECRET:-}
       # LiteLLM's Ollama provider reads OLLAMA_API_BASE (verified in litellm
       # source); without this it would dial localhost:11434 *inside the
       # container*. host-gateway maps host.docker.internal to the host.
