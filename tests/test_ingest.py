@@ -6,9 +6,129 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
-from src import ingest
+from src import db, ingest
+
+
+def _mock_connection() -> tuple[MagicMock, MagicMock]:
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = MagicMock()
+    connection.cursor.return_value.__enter__.return_value = cursor
+    return connection, cursor
+
+
+class ReplaceDocumentTests(unittest.TestCase):
+    def test_replace_document_writes_document_and_chunks_before_one_commit(self) -> None:
+        connection, cursor = _mock_connection()
+        chunks = [(0, "first", [1.0, 0.0]), (1, "second", [0.0, 1.0])]
+
+        with (
+            patch.object(db, "connect", return_value=connection) as connect,
+            patch.object(db, "settings", SimpleNamespace(embedding_dim=2)),
+        ):
+            db.replace_document(
+                "doc-1",
+                "Title",
+                "full content",
+                "/corpus/doc.md",
+                chunks,
+            )
+
+        connect.assert_called_once_with()
+        connection.commit.assert_called_once_with()
+        calls = cursor.execute.call_args_list
+        self.assertEqual(len(calls), 4)
+        self.assertIn("INSERT INTO documents", calls[0].args[0])
+        self.assertEqual(
+            calls[0].args[1],
+            ("doc-1", "Title", "/corpus/doc.md", "full content"),
+        )
+        self.assertIn("DELETE FROM chunks", calls[1].args[0])
+        self.assertEqual(calls[1].args[1], ("doc-1",))
+        self.assertEqual(calls[2].args[1], ("doc-1", 0, "first", [1.0, 0.0]))
+        self.assertEqual(calls[3].args[1], ("doc-1", 1, "second", [0.0, 1.0]))
+
+    def test_replace_document_rejects_dimension_mismatch_before_writes(self) -> None:
+        connection, _ = _mock_connection()
+
+        with (
+            patch.object(db, "connect", return_value=connection) as connect,
+            patch.object(db, "settings", SimpleNamespace(embedding_dim=2)),
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                r"doc_id='doc-1'.*chunk_index=4",
+            ):
+                db.replace_document(
+                    "doc-1",
+                    "Title",
+                    "content",
+                    None,
+                    [(0, "valid", [1.0, 0.0]), (4, "bad", [1.0])],
+                )
+
+        connect.assert_not_called()
+
+    def test_replace_document_rejects_nan_embedding_before_writes(self) -> None:
+        connection, _ = _mock_connection()
+
+        with (
+            patch.object(db, "connect", return_value=connection) as connect,
+            patch.object(db, "settings", SimpleNamespace(embedding_dim=2)),
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                r"doc_id='doc-1'.*chunk_index=9",
+            ):
+                db.replace_document(
+                    "doc-1",
+                    "Title",
+                    "content",
+                    None,
+                    [(9, "bad", [float("nan"), 0.0])],
+                )
+
+        connect.assert_not_called()
+
+    def test_replace_document_rejects_none_embedding_before_writes(self) -> None:
+        connection, _ = _mock_connection()
+
+        with (
+            patch.object(db, "connect", return_value=connection) as connect,
+            patch.object(db, "settings", SimpleNamespace(embedding_dim=2)),
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                r"doc_id='doc-1'.*chunk_index=3",
+            ):
+                db.replace_document(
+                    "doc-1",
+                    "Title",
+                    "content",
+                    None,
+                    [(3, "bad", None)],  # type: ignore[list-item]
+                )
+
+        connect.assert_not_called()
+
+    def test_replace_document_accepts_empty_chunk_replacement(self) -> None:
+        connection, cursor = _mock_connection()
+
+        with (
+            patch.object(db, "connect", return_value=connection),
+            patch.object(db, "settings", SimpleNamespace(embedding_dim=2)),
+        ):
+            db.replace_document("doc-1", "Title", "content", None, [])
+
+        connection.commit.assert_called_once_with()
+        calls = cursor.execute.call_args_list
+        self.assertEqual(len(calls), 2)
+        self.assertIn("INSERT INTO documents", calls[0].args[0])
+        self.assertIn("DELETE FROM chunks", calls[1].args[0])
+
 
 
 class IngestContractTests(unittest.TestCase):
@@ -22,17 +142,20 @@ class IngestContractTests(unittest.TestCase):
             with (
                 patch.object(ingest, "chunk_text", return_value=chunks),
                 patch.object(ingest, "embed_texts", return_value=embeddings),
-                patch.object(ingest, "upsert_document") as upsert,
-                patch.object(ingest, "insert_chunks") as insert,
+                patch.object(ingest, "replace_document") as replace,
             ):
                 count = ingest.ingest_file(path)
 
             self.assertEqual(count, 2)
-            upsert.assert_called_once()
-            doc_id = upsert.call_args.kwargs["doc_id"]
-            insert.assert_called_once_with(
-                doc_id,
-                [(0, "first", [1.0, 0.0]), (1, "second", [0.0, 1.0])],
+            replace.assert_called_once_with(
+                doc_id=ingest._doc_id(path, "document"),
+                title="document",
+                content="content",
+                url=str(path),
+                chunks=[
+                    (0, "first", [1.0, 0.0]),
+                    (1, "second", [0.0, 1.0]),
+                ],
             )
 
     def test_ingest_file_rejects_embedding_count_mismatch_before_writes(self) -> None:
@@ -43,14 +166,12 @@ class IngestContractTests(unittest.TestCase):
             with (
                 patch.object(ingest, "chunk_text", return_value=["first", "second"]),
                 patch.object(ingest, "embed_texts", return_value=[[1.0]]),
-                patch.object(ingest, "upsert_document") as upsert,
-                patch.object(ingest, "insert_chunks") as insert,
+                patch.object(ingest, "replace_document") as replace,
             ):
                 with self.assertRaises(ValueError):
                     ingest.ingest_file(path)
 
-            upsert.assert_not_called()
-            insert.assert_not_called()
+            replace.assert_not_called()
 
     def test_directory_propagates_mismatch_with_path_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -61,8 +182,7 @@ class IngestContractTests(unittest.TestCase):
                 patch.object(ingest, "init_db"),
                 patch.object(ingest, "chunk_text", return_value=["first", "second"]),
                 patch.object(ingest, "embed_texts", return_value=[[1.0]]),
-                patch.object(ingest, "upsert_document"),
-                patch.object(ingest, "insert_chunks"),
+                patch.object(ingest, "replace_document"),
             ):
                 with self.assertRaisesRegex(ValueError, str(path)):
                     ingest.ingest_directory(Path(tmpdir))

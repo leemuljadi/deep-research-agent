@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 
 from .config import settings
-from .db import init_db, insert_chunks, upsert_document
+from .db import init_db, replace_document
 from .llm import embed_texts
 
 
@@ -50,8 +50,13 @@ def ingest_file(path: Path, title: str | None = None) -> int:
     embeddings = embed_texts(chunks)
     chunk_rows = list(zip(range(len(chunks)), chunks, embeddings, strict=True))
 
-    upsert_document(doc_id=doc_id, title=title, content=text, url=str(path))
-    insert_chunks(doc_id, chunk_rows)
+    replace_document(
+        doc_id=doc_id,
+        title=title,
+        content=text,
+        url=str(path),
+        chunks=chunk_rows,
+    )
     return len(chunks)
 
 

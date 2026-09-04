@@ -5,6 +5,7 @@ contract's read queries.
 """
 from __future__ import annotations
 
+import math
 import uuid
 import psycopg
 from typing import Any
@@ -137,6 +138,65 @@ def insert_chunks(doc_id: str, chunks: list[tuple[int, str, list[float]]]) -> No
                     VALUES (%s, %s, %s, %s)
                     """,
                     (doc_id, idx, text, emb),
+                )
+        conn.commit()
+
+
+def replace_document(
+    doc_id: str,
+    title: str,
+    content: str,
+    url: str | None,
+    chunks: list[tuple[int, str, list[float]]],
+) -> None:
+    """Atomically replace a document and its validated chunks."""
+    expected_dim = settings.embedding_dim
+    for chunk_index, _, embedding in chunks:
+        if embedding is None:
+            raise ValueError(
+                f"Invalid embedding for doc_id={doc_id!r}, chunk_index={chunk_index}: "
+                "embedding must not be None"
+            )
+        actual_dim = len(embedding)
+        if actual_dim != expected_dim:
+            raise ValueError(
+                f"Invalid embedding for doc_id={doc_id!r}, chunk_index={chunk_index}: "
+                f"expected dimension {expected_dim}, got {actual_dim}"
+            )
+        try:
+            is_finite = all(math.isfinite(value) for value in embedding)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                f"Invalid embedding for doc_id={doc_id!r}, chunk_index={chunk_index}: "
+                "embedding values must be finite numbers"
+            ) from exc
+        if not is_finite:
+            raise ValueError(
+                f"Invalid embedding for doc_id={doc_id!r}, chunk_index={chunk_index}: "
+                "embedding values must be finite numbers"
+            )
+
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO documents (id, title, url, content)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    title = EXCLUDED.title,
+                    url = EXCLUDED.url,
+                    content = EXCLUDED.content
+                """,
+                (doc_id, title, url, content),
+            )
+            cur.execute("DELETE FROM chunks WHERE doc_id = %s", (doc_id,))
+            for chunk_index, text, embedding in chunks:
+                cur.execute(
+                    """
+                    INSERT INTO chunks (doc_id, chunk_index, content, embedding)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (doc_id, chunk_index, text, embedding),
                 )
         conn.commit()
 
