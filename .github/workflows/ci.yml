@@ -8,8 +8,8 @@
 #          NOTE: evals/reports/*.json is gitignored by default — either commit
 #          a report pair with `git add -f` or upload/download them as workflow
 #          artifacts. The lane skips cleanly when no pair is present.
-# Tier 3 — nightly: the full golden-set eval harness on a schedule. Requires
-#          the live stack (Ollama + Postgres), so it runs only by cron.
+# Tier 3 — nightly: runs the golden set twice with identical samples and frozen
+#          loop-off/loop-on modes, then feeds that pair to the shadow gate.
 name: CI
 
 on:
@@ -117,7 +117,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      - name: Ingest sample corpus and run the golden-set eval
+      - name: Ingest sample corpus and run paired bounded-reflection evals
         env:
           POSTGRES_HOST: localhost
           POSTGRES_USER: postgres
@@ -126,10 +126,7 @@ jobs:
           OLLAMA_API_BASE: http://localhost:11434
         run: |
           python -m scripts.ingest_corpus data/sample
-          python -m scripts.run_eval --name nightly
-      - name: Run the merge gate (candidate nightly vs its own baseline sections)
-        # The nightly run's report IS both baseline and candidate on the first
-        # schedule (no prior artifact); the gate then always passes — the real
-        # baseline arrives from the second nightly onward via artifact upload.
-        run: |
-          python -m evals.gate --shadow nightly nightly
+          python -m scripts.run_eval --name loop-off --loop-mode off
+          python -m scripts.run_eval --name loop-on --loop-mode on
+      - name: Run paired reflection gate (shadow)
+        run: python -m evals.gate --shadow loop-off loop-on

@@ -1,13 +1,16 @@
-"""CLI: run the evaluation harness over the golden set.
+"""CLI for golden-set runs, report comparison, and the AD-11 gate.
 
-Usage:
-    python -m scripts.run_eval [--name <report-name>]
-    python -m scripts.run_eval --compare <baseline> <candidate>
-    python -m scripts.run_eval --gate <baseline> <candidate> [--shadow]
+Examples:
+    python -m scripts.run_eval --name loop-off --loop-mode off
+    python -m scripts.run_eval --name loop-on --loop-mode on
+    python -m scripts.run_eval --compare loop-off loop-on
+    python -m scripts.run_eval --gate loop-off loop-on --shadow
 """
 from __future__ import annotations
 
+import argparse
 import sys
+from functools import partial
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -17,32 +20,46 @@ from evals.golden_set import GOLDEN_SET  # noqa: E402
 from src.db import init_db  # noqa: E402
 
 
-def main() -> None:
-    if "--compare" in sys.argv:
-        i = sys.argv.index("--compare")
-        if len(sys.argv) < i + 3:
-            print("Usage: python -m scripts.run_eval --compare <baseline> <candidate>")
-            sys.exit(1)
-        compare(sys.argv[i + 1], sys.argv[i + 2])
-        return
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="scripts.run_eval")
+    action = parser.add_mutually_exclusive_group()
+    action.add_argument(
+        "--compare", nargs=2, metavar=("BASELINE", "CANDIDATE")
+    )
+    action.add_argument("--gate", nargs=2, metavar=("BASELINE", "CANDIDATE"))
+    parser.add_argument("--shadow", action="store_true", help="advisory gate mode")
+    parser.add_argument("--name", default="latest", help="saved report name")
+    parser.add_argument(
+        "--loop-mode",
+        choices=("off", "on"),
+        default="on",
+        help="freeze bounded reflection off or on for this report",
+    )
+    return parser
 
-    if "--gate" in sys.argv:
-        i = sys.argv.index("--gate")
-        if len(sys.argv) < i + 3:
-            print("Usage: python -m scripts.run_eval --gate <baseline> <candidate> [--shadow]")
-            sys.exit(1)
-        # The merge gate (AD-11): same exit-code contract as `python -m
-        # evals.gate` — 0 pass, 1 blocked, 3 EVAL_INFRA_FAILURE.
+
+def main(argv: list[str] | None = None) -> None:
+    args = _parser().parse_args(argv)
+    if args.compare:
+        compare(*args.compare)
+        return
+    if args.gate:
         from evals.gate import main as gate_main
 
-        sys.exit(gate_main(sys.argv[i + 1 :]))  # remaining argv: candidate [--shadow]
+        gate_argv = [*args.gate]
+        if args.shadow:
+            gate_argv.insert(0, "--shadow")
+        raise SystemExit(gate_main(gate_argv))
+    if args.shadow:
+        _parser().error("--shadow requires --gate")
 
     init_db()
-    name = "latest"
-    if "--name" in sys.argv:
-        i = sys.argv.index("--name")
-        name = sys.argv[i + 1]
-    run_harness(GOLDEN_SET, run_fn=run_fn_harness, name=name)
+    run_harness(
+        GOLDEN_SET,
+        run_fn=partial(run_fn_harness, loop_mode=args.loop_mode),
+        name=args.name,
+    )
+
 
 if __name__ == "__main__":
     main()

@@ -44,6 +44,39 @@ class ResearchPlan(BaseModel):
     )
 
 
+class PlannerReflection(BaseModel):
+    """Validated graph-owned review of one completed research round."""
+
+    score: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Quality/completeness score for the current plan and findings.",
+    )
+    needs_more_research: bool = Field(
+        description="Whether meaningful unresolved gaps remain."
+    )
+    additional_sub_questions: list[str] = Field(
+        default_factory=list,
+        description="Novel questions that would close the remaining gaps.",
+    )
+    rationale: str = Field(description="Brief reason for the score and decision.")
+
+
+class SynthesisReview(BaseModel):
+    """Validated graph-owned review of a draft against the research findings."""
+
+    score: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Grounded completeness score for the current draft.",
+    )
+    needs_revision: bool = Field(
+        description="Whether the draft has a meaningful correctable omission."
+    )
+    feedback: str = Field(
+        description="Specific revision guidance grounded in the supplied findings."
+    )
+
 class Source(BaseModel):
     """A retrieved / grounded source."""
 

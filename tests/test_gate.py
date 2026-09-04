@@ -461,5 +461,129 @@ class JudgeTimeoutTests(unittest.TestCase):
         self.assertEqual(rc, 3)
 
 
+class LoopModeHarnessTests(unittest.TestCase):
+    def test_loop_mode_is_frozen_into_worker_equivalent_state(self) -> None:
+        from src.schemas import ResearchReport
+
+        report = ResearchReport(
+            summary="s", findings=[], sources=[], confidence=0.9
+        )
+        for mode, enabled in (("off", False), ("on", True)):
+            with self.subTest(mode=mode):
+                with (
+                    patch(
+                        "src.graph.initial_state",
+                        return_value={"report": report},
+                    ) as initial,
+                    patch(
+                        "src.graph.run_research_state",
+                        return_value=({"report": report}, None),
+                    ),
+                    patch.object(h.llm, "set_run_cap"),
+                    patch.object(h.llm, "clear_run_cap"),
+                ):
+                    returned = h.run_fn_harness("q", loop_mode=mode)
+                self.assertIs(returned, report)
+                initial.assert_called_once_with("q", [], reflection_enabled=enabled)
+
+    def test_loop_on_off_reports_flow_through_shadow_gate(self) -> None:
+        from src import graph
+        from src.llm import Usage
+        from src.schemas import ResearchPlan, ResearchReport, Source
+
+        plan = ResearchPlan(objective="Objective", sub_questions=["Question"])
+        source = Source(title="Source", snippet="alpha is supported")
+
+        def synthesize(_plan, results):
+            revised = any(
+                result.sub_question == "Synthesis review of the prior draft"
+                for result in results
+            )
+            summary = "alpha improved" if revised else "draft"
+            return (
+                ResearchReport(
+                    summary=summary,
+                    findings=[summary],
+                    sources=[source],
+                    confidence=0.8,
+                ),
+                Usage(total_tokens=1),
+            )
+
+        reflection_outputs = [
+            (
+                '{"score":0.8,"needs_more_research":false,'
+                '"additional_sub_questions":[],"rationale":"complete"}',
+                Usage(total_tokens=1),
+            ),
+            (
+                '{"score":0.5,"needs_revision":true,"feedback":"Include alpha"}',
+                Usage(total_tokens=1),
+            ),
+            (
+                '{"score":0.9,"needs_revision":false,"feedback":"complete"}',
+                Usage(total_tokens=1),
+            ),
+        ]
+        sample = h.EvalSample(question="Question", expected_keywords=["alpha"])
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(h, "REPORTS_DIR", Path(tmp)),
+            patch.object(gate, "REPORTS_DIR", Path(tmp)),
+            patch.object(graph, "plan", return_value=(plan, Usage(total_tokens=1))),
+            patch.object(
+                graph,
+                "research_sub_question",
+                return_value=(["alpha is supported"], [source], Usage(total_tokens=1)),
+            ),
+            patch.object(graph, "synthesize", side_effect=synthesize),
+            patch.object(
+                graph, "chat_with_usage", side_effect=reflection_outputs
+            ),
+            patch.object(
+                graph, "trace", return_value=contextlib.nullcontext(object())
+            ),
+            patch.object(graph, "record_cost"),
+            patch.object(h.llm, "set_run_cap"),
+            patch.object(h.llm, "clear_run_cap"),
+            patch.object(
+                h,
+                "_accuracy",
+                side_effect=lambda report, _sample: (
+                    1.0 if "alpha" in report.summary else 0.0
+                ),
+            ),
+            patch.object(h, "_faithfulness", return_value=1.0),
+        ):
+            loop_off = h.run_harness(
+                [sample],
+                run_fn=lambda question: h.run_fn_harness(
+                    question, loop_mode="off"
+                ),
+                name="loop-off",
+            )
+            loop_on = h.run_harness(
+                [sample],
+                run_fn=lambda question: h.run_fn_harness(
+                    question, loop_mode="on"
+                ),
+                name="loop-on",
+            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                rc = gate.run_gate("loop-off", "loop-on", shadow=True)
+
+        self.assertEqual(rc, 0)
+        self.assertGreater(
+            loop_on.results[0].accuracy,
+            loop_off.results[0].accuracy,
+        )
+        self.assertIn("VERDICT: PASS", output.getvalue())
+
+    def test_unknown_loop_mode_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "loop_mode"):
+            h.run_fn_harness("q", loop_mode="maybe")
+
+
 if __name__ == "__main__":
     unittest.main()

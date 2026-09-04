@@ -25,6 +25,7 @@ from src.config import settings  # noqa: E402
 from src.graph import (  # noqa: E402
     deserialize_state,
     initial_state,
+    reset_for_redirect,
     run_research_state,
     serialize_state,
 )
@@ -70,15 +71,11 @@ def process_one_job(worker_id: str) -> bool:
                 fail_job(job_id, f"ValueError: corrupt snapshot: {exc}")
                 print(f"[worker {worker_id}] job {job_id} failed: {exc}")
                 return True
-            # A redirect decision re-points the run at a new question: the
-            # prior plan and its sub-results no longer answer it, so they are
-            # cleared and every gate re-arms — the resumed run re-plans against
-            # the redirected question and the human re-approves each gate.
+            # Redirect re-arms the complete bounded machine. Its candidates and
+            # counters are invalid for the new question; usage remains so cost
+            # accounting still covers the whole run.
             if job.get("resume_question"):
-                state["question"] = job["resume_question"]
-                state["plan"] = None
-                state["sub_results"] = []
-                state["passed_gates"] = []
+                reset_for_redirect(state, job["resume_question"])
             gates = list(state.get("gate_policy") or [])
         else:
             gates = _gate_policy(job)

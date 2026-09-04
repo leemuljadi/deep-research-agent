@@ -18,10 +18,11 @@ The system:
 
 1. **Plans** the research into a set of sub-questions (lead agent).
 2. **Spawns parallel sub-agents** (LangGraph) — each one retrieves + reads sources.
-3. **Ingests** retrieved content into a **pgvector** store (chunk → embed → index).
-4. **Retrieves** with **hybrid search** (vector + full-text + Reciprocal Rank Fusion).
-5. **Grounds** the final report in those sources with citations.
-6. Returns a **structured (Pydantic)**, sourced report.
+3. **Reflects on research gaps** and runs only novel follow-up questions within a hard cap.
+4. **Ingests** retrieved content into a **pgvector** store (chunk → embed → index).
+5. **Retrieves** with **hybrid search** (vector + full-text + Reciprocal Rank Fusion).
+6. **Synthesizes and reviews** a grounded draft, retaining the best-scoring report.
+7. Returns a **structured (Pydantic)**, sourced report.
 
 ---
 
@@ -29,9 +30,9 @@ The system:
 
 | Capability | Where it's implemented |
 |---|---|
-| Agents planning multi-step tasks over long horizons | `src/graph.py` — plan → parallel researchers → synthesise state machine |
-| Multi-agent / sub-agent orchestration | `src/graph.py` — LangGraph `Send` fan-out spawns one researcher sub-agent per sub-question, running concurrently, aggregated by the lead |
-| Stateful LLM workflows (LangGraph) | `src/graph.py` |
+| Agents planning multi-step tasks over long horizons | `src/graph.py` — plan → parallel researchers → bounded re-plan → synthesis → bounded review |
+| Multi-agent / sub-agent orchestration | `src/graph.py` — LangGraph `Send` fan-out spawns one researcher sub-agent per sub-question |
+| Stateful LLM workflows and removable reflection edges | `src/graph.py` |
 | RAG + retrieval (pgvector, hybrid, re-rank) | `src/db.py`, `src/search.py` (vector + FTS fused by weighted RRF), `src/ingest.py` |
 | Structured outputs (function calling / Pydantic) | `src/schemas.py`, tool-call schemas |
 | Evaluation harness (accuracy, faithfulness, cost, latency) | `evals/eval_harness.py` — LLM-as-judge accuracy and faithfulness, real token/cost accounting, `--compare` for A/B runs |
@@ -209,6 +210,33 @@ certificates automatically.
 ---
 
 
+## Bounded reflection (optional)
+
+The graph owns two small, removable refinement loops: planner re-planning after
+a research round and draft review before completion. Both stop at their
+non-negative cap, on repeated work, or when the score fails to improve by more
+than the comparison epsilon. Earlier candidates win ties, and the highest
+scoring plan/report is retained.
+
+```bash
+# .env defaults: at most one additional research round and one draft revision
+REFLECTION_ENABLED=true
+PLANNER_REFLECTION_MAX_ITERATIONS=1
+SYNTHESIS_REVIEW_MAX_ITERATIONS=1
+
+# deletion-equivalent / AD-11 loop-off baseline
+REFLECTION_ENABLED=false
+```
+
+Caps count **additional** rounds or revisions and accept zero. Reflection calls
+are skipped entirely when disabled (or when the corresponding cap is zero).
+Values are frozen into each run's state, so a worker restart or HITL resume
+cannot change a run halfway through. The synthesis gate fires only after review
+selects the best report.
+
+---
+
+
 ## Per-run cost cap (optional)
 
 Every run can be bounded by a hard spend cap (AD-15). Crossing it terminates
@@ -255,10 +283,16 @@ reports:
 Outputs a markdown table to stdout and a JSON report to `evals/reports/`.
 
 ```bash
-python -m scripts.run_eval                                  # run the golden set
-python -m scripts.run_eval --name run-b                    # save under a report name
-python -m scripts.run_eval --compare baseline candidate    # side-by-side diff (models, prompts, chunking)
+python -m scripts.run_eval --name loop-off --loop-mode off
+python -m scripts.run_eval --name loop-on --loop-mode on
+python -m scripts.run_eval --compare loop-off loop-on
+python -m evals.gate --shadow loop-off loop-on
 ```
+
+`--loop-mode` is explicit in paired measurements: both reports use the same
+golden samples and the existing shadow gate keeps its story 7 exit-code
+contract. `off` makes one planner, one research round, and one synthesis call
+with no reflection LLM calls; `on` uses the frozen configured caps.
 
 ---
 

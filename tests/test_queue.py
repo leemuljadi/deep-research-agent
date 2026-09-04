@@ -590,8 +590,11 @@ class WorkerCapTests(unittest.TestCase):
         from scripts import worker
 
         snapshot_usage = [Usage(cost_usd=0.30), Usage(cost_usd=0.12)]
+        report = ResearchReport(
+            summary="done", findings=[], sources=[], confidence=0.9
+        )
         state = {
-            "report": None,
+            "report": report,
             "usage_log": snapshot_usage,
             "gate_policy": [],
             "passed_gates": [],
@@ -607,9 +610,11 @@ class WorkerCapTests(unittest.TestCase):
             patch.object(worker.llm, "seed_run_spend") as seed,
             patch.object(worker.llm, "set_run_cap"),
             patch.object(worker.llm, "clear_run_cap"),
+            patch.object(worker, "complete_job") as complete,
         ):
             worker.process_one_job("host:1")
         seed.assert_called_once_with(0.42)
+        complete.assert_called_once_with("job-1", report.model_dump())
 
     def test_worker_clears_cap_in_finally_on_generic_failure(self) -> None:
         from scripts import worker
@@ -940,7 +945,24 @@ class WorkerGateTests(unittest.TestCase):
             "sub_results": ["stale"],
             "gate_policy": ["plan"],
             "passed_gates": ["plan"],
+            "usage_log": [Usage(total_tokens=9, cost_usd=0.01)],
+            "planner_iterations": 1,
+            "pending_sub_questions": ["stale follow-up"],
+            "planner_reflection": "stale reflection",
+            "planner_complete": True,
+            "best_plan": "stale best plan",
+            "best_plan_score": 0.9,
+            "best_sub_results": ["stale best result"],
+            "synthesis_iterations": 1,
+            "synthesis_review": "stale review",
+            "synthesis_feedback": "stale feedback",
+            "synthesis_complete": True,
+            "best_report": "stale best report",
+            "best_report_score": 0.9,
         }
+        completed_report = ResearchReport(
+            summary="redirected", findings=[], sources=[], confidence=0.9
+        )
         with (
             patch.object(
                 worker,
@@ -954,7 +976,10 @@ class WorkerGateTests(unittest.TestCase):
             patch.object(
                 worker,
                 "run_research_state",
-                side_effect=lambda s, g: (s, None),
+                side_effect=lambda state, gates: (
+                    state.update({"report": completed_report}) or state,
+                    None,
+                ),
             ) as run,
             patch.object(worker, "complete_job") as complete,
         ):
@@ -966,6 +991,19 @@ class WorkerGateTests(unittest.TestCase):
         self.assertIsNone(rebuilt["plan"])
         self.assertEqual(rebuilt["sub_results"], [])
         self.assertEqual(rebuilt["passed_gates"], [])
+        self.assertEqual(rebuilt["usage_log"], [Usage(total_tokens=9, cost_usd=0.01)])
+        self.assertEqual(rebuilt["planner_iterations"], 0)
+        self.assertEqual(rebuilt["synthesis_iterations"], 0)
+        for key in (
+            "planner_reflection",
+            "best_plan",
+            "best_plan_score",
+            "synthesis_review",
+            "synthesis_feedback",
+            "best_report",
+            "best_report_score",
+        ):
+            self.assertIsNone(rebuilt[key])
         run.assert_called_once()
 
     def test_worker_corrupt_snapshot_fails_loudly(self) -> None:
@@ -1028,7 +1066,10 @@ class GatedRunnerTests(unittest.TestCase):
             stack.enter_context(patch.object(graph, "trace", return_value=nullcontext(object())))
             stack.enter_context(patch.object(graph, "record_cost"))
 
-            state, gate = graph.run_research_state(gates=["plan", "synthesis"])
+            state = graph.initial_state(
+                "", ["plan", "synthesis"], reflection_enabled=False
+            )
+            state, gate = graph.run_research_state(state)
             self.assertEqual(gate, "plan")
             self.assertEqual(state["passed_gates"], ["plan"])
             self.assertIsNotNone(state["plan"])
@@ -1052,7 +1093,9 @@ class GatedRunnerTests(unittest.TestCase):
             stack.enter_context(patch.object(graph, "trace", return_value=nullcontext(object())))
             stack.enter_context(patch.object(graph, "record_cost"))
 
-            state, gate = graph.run_research_state(gates=[])
+            state, gate = graph.run_research_state(
+                graph.initial_state("", [], reflection_enabled=False)
+            )
             self.assertIsNone(gate)
             self.assertIsNotNone(state["report"])
 
@@ -1069,6 +1112,12 @@ class GatedRunnerTests(unittest.TestCase):
         self.assertEqual(round_tripped["plan"], state["plan"])
         self.assertEqual(round_tripped["sub_results"], state["sub_results"])
         self.assertEqual(round_tripped["usage_log"], state["usage_log"])
+        self.assertEqual(round_tripped["planner_iterations"], 0)
+        self.assertEqual(round_tripped["synthesis_iterations"], 0)
+        self.assertEqual(
+            round_tripped["planner_reflection_max_iterations"],
+            state["planner_reflection_max_iterations"],
+        )
         self.assertIsNone(round_tripped["report"])
 
     def test_snapshot_serialization_is_json_clean(self) -> None:
@@ -1082,6 +1131,81 @@ class GatedRunnerTests(unittest.TestCase):
             graph.deserialize_state({"plan": {"objective": 123}})
         with self.assertRaises(ValueError):
             graph.deserialize_state({})  # missing 'question'
+
+    def test_deserialize_rejects_corrupt_reflection_counter(self) -> None:
+        snapshot = graph.serialize_state(graph.initial_state("q", []))
+        snapshot["planner_iterations"] = -1
+        with self.assertRaisesRegex(ValueError, "planner_iterations"):
+            graph.deserialize_state(snapshot)
+
+    def test_synthesis_gate_fires_after_review_and_resume_makes_no_agent_call(self) -> None:
+        plan = ResearchPlan(objective="o", sub_questions=["sub q"])
+        first = ResearchReport(
+            summary="first", findings=["f"], sources=[], confidence=0.7
+        )
+        revised = ResearchReport(
+            summary="revised", findings=["f", "g"], sources=[], confidence=0.9
+        )
+        reflection_outputs = [
+            (
+                '{"score":0.7,"needs_more_research":false,'
+                '"additional_sub_questions":[],"rationale":"complete"}',
+                Usage(total_tokens=1),
+            ),
+            (
+                '{"score":0.6,"needs_revision":true,"feedback":"Add g"}',
+                Usage(total_tokens=1),
+            ),
+            (
+                '{"score":0.9,"needs_revision":true,"feedback":"Cap reached"}',
+                Usage(total_tokens=1),
+            ),
+        ]
+        state = graph.initial_state(
+            "q",
+            ["synthesis"],
+            reflection_enabled=True,
+            planner_reflection_max_iterations=1,
+            synthesis_review_max_iterations=1,
+        )
+        with (
+            patch.object(graph, "plan", return_value=(plan, Usage(total_tokens=1))),
+            patch.object(
+                graph,
+                "research_sub_question",
+                return_value=(["f"], [], Usage(total_tokens=1)),
+            ),
+            patch.object(
+                graph,
+                "synthesize",
+                side_effect=[(first, Usage(total_tokens=1)), (revised, Usage(total_tokens=1))],
+            ) as synth,
+            patch.object(graph, "chat_with_usage", side_effect=reflection_outputs) as reflect,
+            patch.object(graph, "trace", return_value=nullcontext(object())),
+            patch.object(graph, "record_cost"),
+        ):
+            state, gate = graph.run_research_state(state)
+
+        self.assertEqual(gate, "synthesis")
+        self.assertEqual(state["report"].summary, "revised")
+        self.assertTrue(state["synthesis_complete"])
+        self.assertEqual(synth.call_count, 2)
+        self.assertEqual(reflect.call_count, 3)
+        self.assertEqual(state["report"].total_tokens, 7)
+
+        with (
+            patch.object(graph, "plan", side_effect=AssertionError("planner re-ran")),
+            patch.object(
+                graph,
+                "research_sub_question",
+                side_effect=AssertionError("researcher re-ran"),
+            ),
+            patch.object(graph, "synthesize", side_effect=AssertionError("synthesizer re-ran")),
+            patch.object(graph, "chat_with_usage", side_effect=AssertionError("review re-ran")),
+        ):
+            resumed, resumed_gate = graph.run_research_state(state)
+        self.assertIsNone(resumed_gate)
+        self.assertEqual(resumed["report"].summary, "revised")
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from typing import Literal
 import sys
 from pathlib import Path as _Path
 
@@ -29,6 +30,7 @@ REPORTS_DIR = Path(__file__).resolve().parent / "reports"
 
 # Fallback per-token cost for providers that don't price (e.g. local Ollama).
 TOKEN_COST_PER_1K = 0.0005
+LoopMode = Literal["off", "on"]
 
 
 class JudgeTimeout(RuntimeError):
@@ -300,21 +302,33 @@ def non_inferiority(
     )
 
 
-def run_fn_harness(question: str, *, gates: list[str] | None = None) -> ResearchReport:
-    """Eval-side `run_fn` (AD-11): the same job-boundary path as the worker —
-    gated, cost-capped — with gates auto-approved (explicit harness flag).
+def run_fn_harness(
+    question: str,
+    *,
+    gates: list[str] | None = None,
+    loop_mode: LoopMode = "on",
+) -> ResearchReport:
+    """Eval-side worker-equivalent path with an explicit reflection mode.
 
-    Never imports agent internals: it goes through `run_research_state`, the
-    graph's gated runner, and clears the run scope in a `finally` like the
-    worker does.
+    Gates are auto-approved by this harness. ``off`` freezes reflection off for
+    the run; ``on`` uses the configured non-negative caps. Both modes retain
+    the same cost-cap and snapshot-capable execution path as production.
     """
     from src.graph import initial_state, run_research_state
 
+    if loop_mode not in ("off", "on"):
+        raise ValueError(f"loop_mode must be 'off' or 'on', got {loop_mode!r}")
     run_id = f"eval-{random.randrange(2**64):016x}"
-    cap = settings.run_cost_cap_usd  # cap applies unless disabled per AD-11
+    cap = settings.run_cost_cap_usd
     try:
         llm.set_run_cap(run_id, cap)
-        state, gate = run_research_state(initial_state(question, gates or []))
+        state, gate = run_research_state(
+            initial_state(
+                question,
+                gates or [],
+                reflection_enabled=loop_mode == "on",
+            )
+        )
         if gate is not None:
             # Auto-approve and resume until the run completes (explicit
             # harness flag semantics: gates never stall the eval).

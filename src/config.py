@@ -39,6 +39,29 @@ def _cost_cap_warning(raw: str | None) -> str | None:
         return f"ignoring non-finite RUN_COST_CAP_USD={raw!r}; runs are uncapped"
     return None
 
+def _bool_env(raw: str | None, *, default: bool) -> bool:
+    """Parse a boolean env flag without letting typos silently change behavior."""
+    if raw is None or not raw.strip():
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _non_negative_int_env(raw: str | None, *, default: int) -> int:
+    """Parse a non-negative iteration cap; invalid values keep the safe default."""
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value >= 0 else default
+
+
 def _tool_timeout_env(raw: str | None) -> float:
     """Parse TOOL_TIMEOUT_SECONDS; unset/empty/garbage/non-finite/non-positive
     → 30.0 default (AD-16 per-call tool timeout)."""
@@ -103,6 +126,24 @@ class Settings:
     # within this window with a terminal ToolResult — never an unbounded wait.
     tool_timeout_seconds: float = field(
         default_factory=lambda: _tool_timeout_env(os.getenv("TOOL_TIMEOUT_SECONDS"))
+    )
+
+    # Bounded reflection (AD-7). Caps count additional research rounds/draft
+    # revisions; zero removes the corresponding transition for that run.
+    reflection_enabled: bool = field(
+        default_factory=lambda: _bool_env(
+            os.getenv("REFLECTION_ENABLED"), default=True
+        )
+    )
+    planner_reflection_max_iterations: int = field(
+        default_factory=lambda: _non_negative_int_env(
+            os.getenv("PLANNER_REFLECTION_MAX_ITERATIONS"), default=1
+        )
+    )
+    synthesis_review_max_iterations: int = field(
+        default_factory=lambda: _non_negative_int_env(
+            os.getenv("SYNTHESIS_REVIEW_MAX_ITERATIONS"), default=1
+        )
     )
 
     @property
