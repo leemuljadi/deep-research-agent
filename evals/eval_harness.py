@@ -5,8 +5,10 @@ Accuracy and faithfulness are both LLM-as-judged; cost comes from the real token
 usage LiteLLM reports per run; latency is wall-clock end-to-end.
 """
 from __future__ import annotations
-
 import json
+import math
+import os
+import random
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -16,16 +18,42 @@ from pathlib import Path as _Path
 
 # Ensure repo root is importable so `src` resolves regardless of CWD.
 sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
+import litellm  # noqa: E402
 
 from src.config import settings  # noqa: E402
+from src import llm  # noqa: E402
 from src.llm import chat  # noqa: E402
 from src.schemas import ResearchReport  # noqa: E402
 
 REPORTS_DIR = Path(__file__).resolve().parent / "reports"
-REPORTS_DIR.mkdir(exist_ok=True)
 
 # Fallback per-token cost for providers that don't price (e.g. local Ollama).
 TOKEN_COST_PER_1K = 0.0005
+
+
+class JudgeTimeout(RuntimeError):
+    """The LLM judge exceeded its per-call budget (AD-11: the
+    EVAL_INFRA_FAILURE lane — a timed-out judge is an infra failure, never
+    a silent 0.5 fallback that could pass or block a gate)."""
+
+
+def _judge_timeout_s() -> float:
+    """Per-call judge budget. EVAL_JUDGE_TIMEOUT_S env wins (the manifest
+    pins `timeout_s` and the gate documents it); unset/invalid → 60s.
+    Guarded env parsing per repo convention."""
+    raw = os.getenv("EVAL_JUDGE_TIMEOUT_S")
+    if raw is None or not raw.strip():
+        return 60.0
+    try:
+        val = float(raw)
+    except ValueError:
+        return 60.0
+    if val != val or val in (float("inf"), float("-inf")) or val <= 0:
+        return 60.0
+    return val
+
+
+JUDGE_TIMEOUT_S = _judge_timeout_s()
 
 
 @dataclass
@@ -72,6 +100,7 @@ class EvalReport:
         return {"results": [asdict(r) for r in self.results]}
 
     def save(self, name: str = "latest") -> Path:
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
         path = REPORTS_DIR / f"{name}.json"
         path.write_text(json.dumps(self.to_dict(), indent=2))
         return path
@@ -95,12 +124,19 @@ def _accuracy(report: ResearchReport, sample: EvalSample) -> float:
         + "\n".join(f"- {f}" for f in report.findings)
     )
     try:
-        raw = chat([{"role": "user", "content": prompt}], temperature=0.0).strip()
+        raw = chat(
+            [{"role": "user", "content": prompt}], temperature=0.0,
+            timeout=JUDGE_TIMEOUT_S,
+        ).strip()
         import re
 
         m = re.search(r"\d+(\.\d+)?", raw)
         val = float(m.group()) if m else 0.5
         return max(0.0, min(1.0, val))
+    except litellm.Timeout as exc:
+        raise JudgeTimeout(
+            f"accuracy judge timed out after {JUDGE_TIMEOUT_S}s: {exc}"
+        ) from exc
     except Exception:  # noqa: BLE001
         # Fallback to lexical coverage if the judge is unavailable.
         text = f"{report.summary}\n" + "\n".join(report.findings)
@@ -121,12 +157,19 @@ def _faithfulness(report: ResearchReport) -> float:
         f"SOURCES:\n{corpus}"
     )
     try:
-        raw = chat([{"role": "user", "content": prompt}], temperature=0.0).strip()
+        raw = chat(
+            [{"role": "user", "content": prompt}], temperature=0.0,
+            timeout=JUDGE_TIMEOUT_S,
+        ).strip()
         import re
 
         m = re.search(r"\d+(\.\d+)?", raw)
         val = float(m.group()) if m else 0.5
         return max(0.0, min(1.0, val))
+    except litellm.Timeout as exc:
+        raise JudgeTimeout(
+            f"faithfulness judge timed out after {JUDGE_TIMEOUT_S}s: {exc}"
+        ) from exc
     except Exception:  # noqa: BLE001
         return 0.5
 
@@ -183,3 +226,103 @@ def run_fn_from_cli(question: str) -> ResearchReport:
     from src.graph import run_research
 
     return run_research(question)
+
+
+@dataclass
+class GateVerdict:
+    """Non-inferiority verdict for one metric (AD-11 v2).
+
+    `non_inferior` when the 95% CI lower bound of candidate − baseline is
+    above the metric's tolerance; `ci_lower` is that bound; `ok` is the raw
+    mean delta (informational, never the gate signal).
+    """
+
+    metric: str
+    tolerance: float
+    mean_delta: float
+    ci_lower: float
+    non_inferior: bool
+
+    def line(self) -> str:
+        verdict = "ok" if self.non_inferior else "VIOLATION"
+        return (
+            f"{self.metric:>13}: Δ {self.mean_delta:+.4f}  "
+            f"CI95↓ {self.ci_lower:+.4f}  tol {self.tolerance:+.4f}  → {verdict}"
+        )
+
+
+def bootstrap_ci_lower(
+    deltas: list[float], n_boot: int = 10_000, seed: int = 0
+) -> float:
+    """Paired bootstrap 95% CI lower bound of the mean delta.
+
+    Resamples the candidate−baseline deltas with replacement, seeded so the
+    gate is deterministic for the same inputs (reproducible verdicts).
+    Returns -inf when there is nothing to resample.
+    """
+    if not deltas:
+        return -math.inf
+    rng = random.Random(seed)
+    n = len(deltas)
+    means = []
+    for _ in range(n_boot):
+        means.append(sum(deltas[rng.randrange(n)] for _ in range(n)) / n)
+    means.sort()
+    # Percentile method: the 5th-percentile mean is the 95% one-sided bound.
+    idx = max(0, min(n_boot - 1, int(math.floor(0.05 * n_boot)) - 1))
+    return means[idx]
+
+
+def non_inferiority(
+    a: EvalReport, b: EvalReport, metric: str, tolerance: float
+) -> GateVerdict:
+    """Paired candidate-vs-baseline non-inferiority check for one metric.
+
+    `a` is the baseline report, `b` the candidate. Deltas are computed on
+    matching questions (paired by question text); samples present in only
+    one report are ignored. Higher-is-better for all judged metrics —
+    tolerance is negative when a drop is permitted (e.g. -0.05).
+    """
+    base = {r.question: getattr(r, metric) for r in a.results}
+    deltas = [
+        getattr(rb, metric) - base[rb.question]
+        for rb in b.results
+        if rb.question in base
+    ]
+    mean_delta = sum(deltas) / len(deltas) if deltas else 0.0
+    ci_lower = bootstrap_ci_lower(deltas)
+    return GateVerdict(
+        metric=metric,
+        tolerance=tolerance,
+        mean_delta=mean_delta,
+        ci_lower=ci_lower,
+        non_inferior=ci_lower >= tolerance,
+    )
+
+
+def run_fn_harness(question: str, *, gates: list[str] | None = None) -> ResearchReport:
+    """Eval-side `run_fn` (AD-11): the same job-boundary path as the worker —
+    gated, cost-capped — with gates auto-approved (explicit harness flag).
+
+    Never imports agent internals: it goes through `run_research_state`, the
+    graph's gated runner, and clears the run scope in a `finally` like the
+    worker does.
+    """
+    from src.graph import initial_state, run_research_state
+
+    run_id = f"eval-{random.randrange(2**64):016x}"
+    cap = settings.run_cost_cap_usd  # cap applies unless disabled per AD-11
+    try:
+        llm.set_run_cap(run_id, cap)
+        state, gate = run_research_state(initial_state(question, gates or []))
+        if gate is not None:
+            # Auto-approve and resume until the run completes (explicit
+            # harness flag semantics: gates never stall the eval).
+            state["passed_gates"] = list(state.get("passed_gates") or [])
+            state, gate = run_research_state(state, gates or [])
+            while gate is not None:
+                state, gate = run_research_state(state, gates or [])
+        report = state["report"]
+        return report
+    finally:
+        llm.clear_run_cap(run_id)

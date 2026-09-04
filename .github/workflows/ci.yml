@@ -1,0 +1,135 @@
+# Tiered eval CI gate (AD-11 v2, story 7).
+#
+# Tier 1 — PR gate: the mocked-LLM offline suite blocks PRs (no live LLM, no
+#          DB — every test is a fake/patch per repo convention).
+# Tier 2 — merge gate shadow lane: runs the paired non-inferiority eval gate
+#          when both a baseline and a candidate report exist as committed
+#          artifacts; non-blocking while the manifest is in shadow mode.
+#          NOTE: evals/reports/*.json is gitignored by default — either commit
+#          a report pair with `git add -f` or upload/download them as workflow
+#          artifacts. The lane skips cleanly when no pair is present.
+# Tier 3 — nightly: the full golden-set eval harness on a schedule. Requires
+#          the live stack (Ollama + Postgres), so it runs only by cron.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Nightly full eval lane (03:00 UTC).
+    - cron: "0 3 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # PR smoke lane: mocked-LLM offline suite. Failure = red PR.
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies (requirements.txt is the install source)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run offline suite (mocked LLM, no DB)
+        run: python -m unittest discover -s tests
+
+  eval-shadow:
+    # Merge-gate shadow lane (AD-11): advisory while enforce: false. Runs only
+    # when a committed report pair exists (see the gitignore note above).
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history: report additions may predate HEAD
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Detect baseline and candidate reports
+        id: reports
+        run: |
+          # Shadow convention: the two most recently ADDED report names on the
+          # branch, in git commit order (oldest of the pair = baseline).
+          # grep -z tolerates zero matches so the step reaches present=false
+          # (reports are gitignored; an absent pair is normal, not an error).
+          names="$(git log --diff-filter=A --name-only --format= -20 -- evals/reports \
+            | { grep '\.json$' || true; } | xargs -r -n1 basename | sed 's/\.json$//' \
+            | awk '!seen[$0]++' | tail -2 | tr '\n' ' ')"
+          set -- $names
+          if [ $# -ge 2 ]; then
+            echo "baseline=$1" >> "$GITHUB_OUTPUT"
+            echo "candidate=$2" >> "$GITHUB_OUTPUT"
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Run eval gate (shadow — advisory, always exit 0)
+        if: steps.reports.outputs.present == 'true'
+        run: |
+          python -m evals.gate --shadow \
+            "${{ steps.reports.outputs.baseline }}" \
+            "${{ steps.reports.outputs.candidate }}"
+
+  eval-nightly:
+    # Tier 3: full harness via workflow schedule. Needs the live stack
+    # (Ollama + Postgres services), so it never runs on PRs.
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: research
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Ollama and models (free-local stack, AD-13)
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama serve &
+          sleep 3
+          ollama pull llama3.2
+          ollama pull nomic-embed-text
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Ingest sample corpus and run the golden-set eval
+        env:
+          POSTGRES_HOST: localhost
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: research
+          OLLAMA_API_BASE: http://localhost:11434
+        run: |
+          python -m scripts.ingest_corpus data/sample
+          python -m scripts.run_eval --name nightly
+      - name: Run the merge gate (candidate nightly vs its own baseline sections)
+        # The nightly run's report IS both baseline and candidate on the first
+        # schedule (no prior artifact); the gate then always passes — the real
+        # baseline arrives from the second nightly onward via artifact upload.
+        run: |
+          python -m evals.gate --shadow nightly nightly

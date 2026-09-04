@@ -1,0 +1,23 @@
+# Pinned eval manifest (AD-11 v2, story 7): the merge gate's single source of
+# truth for what it measures and how. Change a value here and the gate's
+# verdicts are no longer comparable to prior runs — that is deliberate.
+#
+# Tolerance values are shadow-phase placeholders (SPEC.md open question;
+# ARCHITECTURE-SPINE Deferred: "Eval-gate tolerance values"). Do not set
+# `enforce: true` until a month of shadow data exists — that flip is a
+# separate review.
+
+dataset: golden_set          # evals/golden_set.py GOLDEN_SET
+judge:
+  prompt_version: v1         # evals/eval_harness.py _accuracy/_faithfulness prompts
+decoding:
+  temperature: 0.0           # judge decoding params, pinned for reproducibility
+metrics:
+  faithfulness:
+    tolerance: -0.05         # placeholder until instrumented (shadow phase)
+  accuracy:
+    tolerance: -0.05         # placeholder until instrumented (shadow phase)
+trials: 1                    # pass^k gates only when this exceeds 1
+max_samples: null            # null = full golden set; an int caps cost (AD-15)
+enforce: false               # shadow mode default — gate reports, always exits 0
+timeout_s: 60                # per-sample judge-call budget; overrun → EVAL_INFRA_FAILURE
