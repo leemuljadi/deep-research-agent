@@ -50,6 +50,11 @@ class RequirementListTests(unittest.TestCase):
         self.assertRequirementFloor(requirements, "litellm", (1, 82, 9))
         # AD-12: the langgraph floor must not span the 1.0 breaking change.
         self.assertRequirementFloor(requirements, "langgraph", (1, 0))
+        # YouTube has no stable public transcript endpoint; the ingest-only
+        # adapter uses the current fetch API while keeping imports lazy.
+        self.assertRequirementFloor(
+            requirements, "youtube-transcript-api", (1, 2, 4)
+        )
 
     def assertRequirementFloor(
         self, requirements: dict[str, str], name: str, minimum: tuple[int, ...]

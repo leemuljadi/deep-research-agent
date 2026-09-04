@@ -2,6 +2,9 @@
 pydantic>=2.7
 python-dotenv>=1.0
 
+# Ingest adapters (YouTube has no stable public transcript endpoint)
+youtube-transcript-api>=1.2.4
+
 # LLM routing (chat + embeddings, multi-provider)
 litellm>=1.82.9  # never 1.82.7/1.82.8 (malicious PyPI uploads, 2026-03) — AD-12
 

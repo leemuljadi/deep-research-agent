@@ -35,29 +35,54 @@ def chunk_text(text: str, size: int | None = None, overlap: int | None = None) -
     return chunks or [text]
 
 
+def _sha1_16(identity: str) -> str:
+    return hashlib.sha1(identity.encode()).hexdigest()[:16]
+
+
 def _doc_id(path: Path, title: str) -> str:
-    raw = f"{path}:{title}".encode()
-    return hashlib.sha1(raw).hexdigest()[:16]
+    return _sha1_16(f"{path}:{title}")
+
+
+def source_doc_id(namespace: str, identity: str) -> str:
+    """Return a source-namespaced, stable SHA-1/16 document ID."""
+    if not namespace or ":" in namespace:
+        raise ValueError("source namespace must be non-empty and contain no colon")
+    if not identity:
+        raise ValueError("source identity must be non-empty")
+    return _sha1_16(f"{namespace}:{identity}")
+
+
+def ingest_text_document(
+    *,
+    doc_id: str,
+    title: str,
+    content: str,
+    url: str | None,
+) -> int:
+    """Chunk, embed, and atomically replace one normalized text document."""
+    chunks = chunk_text(content)
+    embeddings = embed_texts(chunks)
+    chunk_rows = list(zip(range(len(chunks)), chunks, embeddings, strict=True))
+    replace_document(
+        doc_id=doc_id,
+        title=title,
+        content=content,
+        url=url,
+        chunks=chunk_rows,
+    )
+    return len(chunks)
 
 
 def ingest_file(path: Path, title: str | None = None) -> int:
     """Read a text/markdown file, chunk, embed and index it. Returns chunk count."""
     text = path.read_text(encoding="utf-8", errors="ignore")
     title = title or path.stem
-    doc_id = _doc_id(path, title)
-
-    chunks = chunk_text(text)
-    embeddings = embed_texts(chunks)
-    chunk_rows = list(zip(range(len(chunks)), chunks, embeddings, strict=True))
-
-    replace_document(
-        doc_id=doc_id,
+    return ingest_text_document(
+        doc_id=_doc_id(path, title),
         title=title,
         content=text,
         url=str(path),
-        chunks=chunk_rows,
     )
-    return len(chunks)
 
 
 def ingest_directory(dir_path: Path) -> int:
